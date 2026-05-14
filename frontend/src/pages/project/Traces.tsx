@@ -532,7 +532,7 @@ function FilterMenu({ label, value, options, onChange }: FilterMenuProps) {
         </svg>
       </button>
       {open && (
-        <div className="absolute left-0 mt-1.5 z-50 glass-strong glass-edge p-1.5 min-w-[140px]">
+        <div className="absolute left-0 mt-1.5 z-50 glass-strong glass-edge p-1.5 min-w-[220px] w-max max-w-[420px]">
           {options.map(([v, lbl]) => (
             <button
               key={v}
@@ -544,7 +544,7 @@ function FilterMenu({ label, value, options, onChange }: FilterMenuProps) {
                   : 'text-ink-2 hover:bg-indigo-50 hover:text-ink')
               }
             >
-              <span className="flex-1">{lbl}</span>
+              <span className="flex-1 whitespace-nowrap">{lbl}</span>
               {v === value && <span className="dot ok" />}
             </button>
           ))}
