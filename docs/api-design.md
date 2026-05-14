@@ -1,0 +1,492 @@
+# API 与代理协议设计
+
+## 一、代理协议设计
+
+### 1.1 核心理念：URL 内嵌上游地址 + 头部传项目密钥 + Authorization 透传
+
+AILens360 的代理设计核心是 **"把完整上游 URL 直接拼到代理路径里，把项目身份放到请求头里"**：
+
+> 控制台创建 Project 时系统颁发一个 `project_key`（64 位 base62 字符）。应用层把全局唯一的 `proxy_prefix`（形如 `http://host/p`）后**直接拼上要访问的上游完整 URL（含 scheme）**作为 baseURL 使用，同时在请求头里加 `X-AILens-Project-Key: <project_key>` 标识项目归属。**原本的 Authorization / x-api-key / x-goog-api-key 直接透传到真实上游**，AILens360 不持有真实 Key、也不预设上游地址。
+
+代理 URL 格式：
+
+```
+http://{ailens-host}/p/{完整上游 URL，包含 scheme}
+                      ↑
+                      └── e.g. https://api.openai.com/v1/chat/completions
+请求头：
+X-AILens-Project-Key: <project_key>  ←  控制台创建 Project 时颁发，64 位 base62
+```
+
+举例：
+
+```
+http://localhost:8080/p/https://api.openai.com/v1/chat/completions
+http://localhost:8080/p/https://api.anthropic.com/v1/messages
+http://localhost:8080/p/https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent
+http://localhost:8080/p/https://api.deepseek.com/v1/chat/completions
+http://localhost:8080/p/http://localhost:11434/v1/chat/completions   # Ollama / 本地 vLLM
+```
+
+应用层用法（以 OpenAI Python SDK 为例）：
+
+```python
+# Before
+client = OpenAI(
+    api_key="sk-real-openai-key",
+    base_url="https://api.openai.com/v1",
+)
+
+# After：base_url 在上游 URL 前拼 proxy_prefix，通过 default_headers 注入项目密钥
+client = OpenAI(
+    api_key="sk-real-openai-key",            # 仍然是你真实的上游 Key，直接透传
+    base_url="http://localhost:8080/p/https://api.openai.com/v1",
+    default_headers={"X-AILens-Project-Key": "<project_key>"},
+)
+# SDK 会在 base_url 末尾自动追加 /chat/completions，
+# 代理实际收到的请求是：
+#   POST /p/https://api.openai.com/v1/chat/completions
+#   X-AILens-Project-Key: <project_key>
+```
+
+任何能被客户端写出完整 URL 的上游都能直接接入：DeepSeek、Groq、Together、Moonshot、本地 vLLM / Ollama、Anthropic、Gemini 官方端点等等，不需要在 AILens360 侧做任何 per-project 上游配置。
+
+### 1.2 Provider 识别：按上游 Host
+
+provider 不再由请求路径决定，而是从**内嵌上游 URL 的 host** 推断。识别结果**只用于**两件事：(1) 选择对应的 SSE 流解析器；(2) 给 trace 打 `provider` 标签便于过滤。**实际转发地址完全由 URL 中内嵌的上游 URL 决定，与 provider 名字无关**。
+
+| Host 命中规则 | Provider tag | 用途 |
+|---|---|---|
+| host 含 `anthropic` | `anthropic` | Anthropic 风格 SSE 解析（`message_start` / `content_block_delta` / ...） |
+| host 含 `googleapis` 或 `generativelanguage` | `gemini` | Gemini 风格 SSE 解析 |
+| 其他（`api.openai.com` / `api.deepseek.com` / `api.groq.com` / `localhost` / 任意自建） | `openai`（默认） | OpenAI Chat Completions 兼容解析，业界事实标准 |
+
+> 因为 OpenAI Chat Completions 已经是第三方 provider 的事实标准，所以"不匹配 anthropic / gemini host 一律按 openai 解析"足以覆盖绝大多数场景（DeepSeek、Groq、Together、Moonshot、本地 vLLM 都直接走 OpenAI 解析器）。
+
+### 1.3 路由与转发逻辑
+
+代理收到请求后的处理流程：
+
+```
+1. 解析 URL：r.URL.Path = /p/{完整上游 URL}
+   - 因为上游 URL 含 "://"，chi 路由的 {var} 捕获会归一化 / 折叠 "//"，
+     所以代理使用 /p/* 通配挂载，再手动解析 r.URL.Path，
+     直接把 /p/ 后面的剩余部分当成完整上游 URL（含 scheme）
+   - 实现见 internal/proxy/handler.go 中的 parseProxyPath
+2. 读取 X-AILens-Project-Key 头，解析 Project（带本地缓存）
+   - 缺失头：返回 401 missing_project_key
+   - 命中：拿到 project_id 用于落库归因
+   - 未命中：返回 404 project_not_found
+3. 调用 DetectFromHost(upstream.Host) 推断 provider tag，
+   仅用于挑选 SSE 解析器与打 trace 标签
+4. 改写请求：
+   - URL：直接使用 URL 中内嵌的完整上游 URL（scheme + host + path + query）
+   - 透传客户端 Authorization / x-api-key / x-goog-api-key 到上游
+   - 删除 AILens360 内部 Header（X-AILens-*，含 X-AILens-Project-Key）
+5. 透传请求到上游，流式回写响应给客户端
+6. 异步：把请求/响应/指标按 project_id 落库
+   - trace.request_path 记录上游绝对 URL，便于回放与人肉排查
+   - 存储前 REDACT Authorization / Cookie / x-api-key / x-goog-api-key / X-AILens-Project-Key，避免明文密钥进入 trace
+```
+
+### 1.4 Project 的设计要点
+
+#### project_key 命名规则
+- 默认：64 位随机字符串，字符集 `0-9A-Za-z`（base62），约 381 bits 熵
+- 全局唯一；创建时若与既有项目冲突，最多重试 10 次
+- Project 删除后 project_key 不复用
+- 控制台支持「重置 project_key」：旧密钥立即返回 401，需要把所有客户端 `X-AILens-Project-Key` 同步改为新值
+- 64 位 base62 在密码学上无法被穷举枚举，HTTPS + 不在日志 / URL 中暴露即可视作密钥级凭据
+
+#### Project 字段
+- `id`：内部主键（ULID）
+- `project_key`：64 位 base62，作为 `X-AILens-Project-Key` 头的取值，**视同密钥**
+- `name`：人类可读名字，仅用于控制台展示
+- `created_at` / `updated_at`：时间戳
+
+控制台 API 返回 Project 时会附带 `proxy_prefix = scheme://host/p`（部署级前缀，所有项目共用），以及一个 `example` 对象（包含 OpenAI / Anthropic / Gemini 三个常用上游的开箱即用 baseURL），方便前端直接复制使用。
+
+#### 撤销与失效
+- 控制台删除 Project，所有携带该 `project_key` 的请求立刻返回 401 / 404
+- 因为 AILens360 不持有上游 Key，撤销上游访问的最终手段是**在上游平台轮换真实 Key**
+
+### 1.5 元数据透传
+
+应用还可以通过自定义 Header 补充上下文（用于更细粒度的聚合）：
+
+| Header | 作用 |
+|---|---|
+| `X-AILens-Project-Key` | **必填**。项目密钥，标识请求归属哪个 Project |
+| `X-AILens-User` | 终端用户 ID |
+| `X-AILens-Session` | 会话 ID（用于聚合一段对话） |
+| `X-AILens-Tag` | 自定义标签（逗号分隔） |
+| `X-AILens-Trace-Id` / `X-AILens-Trace-Name` | 逻辑 trace 归组 |
+
+这些 Header **不会**被透传到上游 LLM，只用于 AILens360 内部记录。
+
+### 1.6 安全约束
+
+- 生产环境强制 **HTTPS**，避免 Authorization 与 project_key 在传输层泄露
+- `project_key` 默认 64 位 base62（约 381 bits 熵），密码学上不可穷举；视同密钥保管，泄露后通过控制台「重置 project_key」即时轮换
+- AILens360 **永远不存储**客户端透传的上游 Key；trace 详情 / trace 列表 API 都会 REDACT Authorization / Cookie / x-api-key / x-goog-api-key / X-AILens-Project-Key
+- 调用记录支持自动脱敏（屏蔽 prompt 中的手机号 / 邮箱等敏感字段）
+
+## 二、内部 REST API
+
+### 2.1 通用约定
+
+- **Base Path**：`/api`
+- **认证**：先通过 `POST /api/auth/login` 用用户名密码换取 JWT，后续接口都带 `Authorization: Bearer <jwt>`
+- **响应格式**：JSON，统一外壳
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": { ... }
+}
+```
+
+错误响应：
+
+```json
+{
+  "code": 40001,
+  "message": "invalid request",
+  "data": null
+}
+```
+
+### 2.2 认证
+
+```
+POST /api/auth/login
+GET  /api/auth/me
+```
+
+`POST /api/auth/login`（**公开**）：
+
+```json
+// 请求
+{ "username": "admin", "password": "..." }
+
+// 响应
+{
+  "code": 0,
+  "data": {
+    "token": "<jwt>",
+    "expires_at": 1779180625
+  }
+}
+```
+
+- 用户名 / 密码来自配置 `auth.username` / `auth.password`（默认 `admin` / `admin`，生产前**必须**改掉，可走 `AILENS360_AUTH_USERNAME` / `AILENS360_AUTH_PASSWORD` 环境变量）
+- JWT 签名密钥由 `auth.jwt_secret` / `AILENS360_JWT_SECRET` 控制；留空时每次重启都会随机生成，导致旧 token 作废
+- 默认 token TTL = 168h（7 天），由 `auth.token_ttl` 配置
+
+`GET /api/auth/me`（**需 JWT**）：返回当前登录信息，给前端做"我是谁"展示。
+
+### 2.3 Trace 相关
+
+#### 列出 Trace
+
+```
+GET /api/traces
+```
+
+Query 参数：
+- `project_id`：项目过滤
+- `provider`：上游服务商过滤（openai / anthropic / gemini）
+- `model`：模型过滤
+- `status`：success / error
+- `start_time` / `end_time`：时间范围（unix ms）
+- `min_latency_ms` / `max_latency_ms`：延迟过滤
+- `min_tokens` / `max_tokens`：token 数过滤
+- `keyword`：在 prompt/completion 中模糊搜索
+- `limit` / `offset`：分页（默认 50）
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "total": 12450,
+    "items": [
+      {
+        "id": "tr_a1b2c3d4",
+        "created_at": 1731628800000,
+        "project_id": "proj_xxx",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "is_stream": true,
+        "status": "success",
+        "request_path": "https://api.openai.com/v1/chat/completions",
+
+        "input_tokens": 234,
+        "output_tokens": 567,
+        "total_tokens": 801,
+        "tokens_estimated": false,
+        "cost_usd": 0.00123,
+
+        "latency_ms": 1234,
+        "ttft_ms": 345,
+        "ttft_upstream_ms": 312,
+        "ttfb_ms": 188,
+        "generation_duration_ms": 889,
+        "tpot_ms": 1.57,
+        "tps": 637.8,
+        "inter_token_p50_ms": 1.4,
+        "inter_token_p95_ms": 4.2,
+        "inter_token_p99_ms": 12.8,
+
+        "chunk_count": 567,
+        "bytes_streamed": 18342,
+        "finish_reason": "stop",
+        "stream_status": "completed",
+
+        "user_id": "user_001",
+        "session_id": "sess_xxx",
+        "tags": "prod,chatbot",
+        "trace_id": "run_xyz",
+        "trace_name": "customer_support_agent"
+      }
+    ]
+  }
+}
+```
+
+支持的 Query 过滤：`project_id` / `trace_id` / `user_id` / `session_id` / `provider` / `model` / `status` / `start_time` / `end_time` / `limit` / `offset`。`limit` 默认 0（即不限），生产用法**强烈建议**显式指定 `limit + offset` 翻页。
+
+字段速查：
+
+| 字段 | 含义 |
+|---|---|
+| `ttft_ms` | **首 token 延迟（核心 KPI）**：从客户端请求进入到第一个 token 输出 |
+| `ttft_upstream_ms` | 仅上游侧首 token 延迟（去除 AILens360 内网开销） |
+| `ttfb_ms` | 上游 HTTP 首字节延迟 |
+| `generation_duration_ms` | 纯生成时长（首 token → 末 token） |
+| `tpot_ms` | 每 token 平均生成耗时 |
+| `tps` | 输出吞吐 tokens/sec |
+| `inter_token_p*_ms` | token 间隔分位数（捕捉抖动） |
+| `chunk_count` | SSE chunk 总数 |
+| `tokens_estimated` | true 表示 output_tokens 是本地 tokenizer 估算（非上游返回） |
+| `stream_status` | completed / aborted / errored / stalled |
+| `request_path` | 本次请求转发到上游的**绝对 URL**（含 scheme + host + path + query） |
+
+> 非流式请求的 `ttft_ms` 为 `null`，避免把完整响应耗时误统计为首 token 延迟。
+
+#### 单个 Trace 详情
+
+```
+GET /api/traces/:id
+```
+
+返回完整请求/响应 + 流式细节：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "id": "tr_a1b2c3d4",
+    "request": {
+      "headers": { /* Authorization / x-api-key / x-goog-api-key / Cookie 已被 REDACTED */ },
+      "body": { /* 完整请求 JSON，可能因 raw 上限被截断 */ },
+      "raw_truncated": false
+    },
+    "response": {
+      "headers": { ... },
+      "body": { /* 非流式：完整响应 JSON */ },
+      "raw_truncated": false,
+      "stream_chunks": [
+        {
+          "seq": 0,
+          "ts": 1731628800345,
+          "delta_text": "Hello",
+          "delta_tokens": 1,
+          "raw": "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"
+        },
+        { "seq": 1, "ts": 1731628800346, "delta_text": ",", "delta_tokens": 1 }
+      ]
+    },
+    "metrics": { /* 见上方 items 中所有指标字段 */ },
+    "timeline": [
+      { "event": "request_received",     "ts": 1731628800000 },
+      { "event": "upstream_dialed",      "ts": 1731628800020 },
+      { "event": "upstream_request_sent","ts": 1731628800045 },
+      { "event": "upstream_first_byte",  "ts": 1731628800233 },
+      { "event": "first_token",          "ts": 1731628800345 },
+      { "event": "last_token",           "ts": 1731628801234 },
+      { "event": "upstream_done",        "ts": 1731628801240 },
+      { "event": "response_out",         "ts": 1731628801245 }
+    ]
+  }
+}
+```
+
+> `stream_chunks` 默认只在详情接口返回；列表接口为了体积考虑只返回聚合指标。
+
+#### 列出 Trace Group（按逻辑 trace 聚合，Langfuse 风格）
+
+```
+GET /api/trace_groups
+```
+
+每行对应一个 `trace_id`，把同一次 Agent 运行的多次模型调用聚合成一行：`span_count` / `input_tokens` / `output_tokens` / `total_tokens` / `cost_usd` 求和；`latency_ms` = 组内 `max(created_at) − min(created_at)`；`status` 取组内最坏态（`error > aborted > success`）。
+
+支持过滤：`project_id` / `user_id` / `session_id` / `trace_name`（精确匹配）/ `provider`（命中任一 span 即匹配）/ `model`（同前）/ `status` / `start_time` / `end_time` / `limit` / `offset`。
+
+> 同一组内的各 span 详情仍走 `GET /api/traces?trace_id=<id>` 展开。
+
+#### 重放 Trace（规划中，尚未实现）
+
+```
+POST /api/traces/:id/replay      # v0.2+
+```
+
+`request_path` 字段已经把上游绝对 URL 写入了 trace（迁移 0003），重放接口的实现条件已经满足，但路由本身尚未挂在 `internal/api/router.go` 中。落地时调用方需要在 body 中显式提供一个可用的上游 `authorization`（原 Header 已 REDACT，不可恢复）。
+
+### 2.4 指标统计
+
+#### 用量统计
+
+```
+GET /api/metrics/usage
+```
+
+参数：
+- `dimension`：聚合维度（`provider` / `model` / `project` / `day` / `hour`）
+- `start_time` / `end_time`
+- `project_id`（可选过滤）
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "dimension": "model",
+    "items": [
+      {
+        "key": "gpt-4o-mini",
+        "calls": 12450,
+        "input_tokens": 1245000,
+        "output_tokens": 567000,
+        "total_tokens": 1812000,
+        "cost_usd": 12.34,
+        "avg_latency_ms": 1234,
+        "error_rate": 0.0023
+      }
+    ]
+  }
+}
+```
+
+### 2.5 Project
+
+Project 是唯一的一级实体，承担"归因维度 + 代理入口"两件事。AILens360 不再像早期版本那样区分 upstream / short_link / proxy_key——所有上游 URL 和真实 Authorization 由客户端在 baseURL / Header 中直接提供。
+
+```
+POST   /api/projects                          # 创建 Project，返回 project_key、proxy_prefix 与 example
+GET    /api/projects                          # 列表
+GET    /api/projects/:id                      # 详情
+PUT    /api/projects/:id                      # 更新（目前仅 name）
+POST   /api/projects/:id/reset_project_key    # 重置 project_key（旧密钥立即失效，返回新 Project）
+DELETE /api/projects/:id                      # 删除（删除后 project_key 立刻失效）
+```
+
+请求 / 响应示例：
+
+```bash
+curl -X POST http://localhost:8080/api/projects \
+     -H 'Authorization: Bearer $ADMIN_TOKEN' \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"my-app"}'
+```
+
+```json
+{
+  "code": 0,
+  "data": {
+    "id": "prj_01HV...",
+    "project_key": "kJ8s...64-char-base62...",
+    "name": "my-app",
+    "proxy_prefix": "http://localhost:8080/p",
+    "example": {
+      "openai":    "http://localhost:8080/p/https://api.openai.com/v1",
+      "anthropic": "http://localhost:8080/p/https://api.anthropic.com",
+      "gemini":    "http://localhost:8080/p/https://generativelanguage.googleapis.com/v1beta"
+    },
+    "created_at": 1778575825,
+    "updated_at": 1778575825
+  }
+}
+```
+
+> `proxy_prefix` 是部署级**前缀**（所有项目共用 `host/p`），不是最终 baseURL：使用时在它后面继续拼接完整的上游 URL（含 scheme），客户端 SDK 通常会在此基础上再追加自己的相对路径。`example` 字段给出了三个最常见上游的开箱即用形态，前端可以直接复制。项目身份通过 `X-AILens-Project-Key: <project_key>` 请求头识别。
+
+接入应用（以 OpenAI 官方端点为例）：
+
+```bash
+curl -X POST 'http://localhost:8080/p/https://api.openai.com/v1/chat/completions' \
+     -H 'Authorization: Bearer sk-real-openai-key' \
+     -H 'X-AILens-Project-Key: kJ8s...64-char-base62...' \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+换成 DeepSeek / Groq / 本地 vLLM 只需要把上游 URL 段换掉，其它都不变。
+
+### 2.6 实时流（规划中，尚未实现）
+
+`WS /api/stream` 计划用于 Web Console 的"实时调用墙"，连接后推送 `trace.created` 事件，支持按 `project_id` / `model` 过滤。当前控制台靠定时轮询 `GET /api/traces` 拿最新数据，规划 v0.2 引入 WebSocket。
+
+## 三、SDK 设计（v0.4+）
+
+虽然主推无需 SDK 的代理接入，但提供可选 SDK 用于：
+- 显式打 tag / metadata
+- 关联应用层 trace
+- 手动补充信息（如评分）
+
+```go
+// Go SDK 示例
+ail := ailens360.New("ail-ak-xxx")  // 控制台 API Key，仅用于补充元数据
+
+ctx := ail.StartSession(context.Background(),
+    ailens360.WithUser("user_001"),
+    ailens360.WithTags("chatbot", "prod"),
+)
+
+// 后续 OpenAI SDK 自动通过 ctx 携带元数据
+resp, _ := openaiClient.Chat.Completions.New(ctx, req)
+
+// 可选：补充评分
+ail.Annotate(traceID, ailens360.Score(0.95), ailens360.Feedback("good"))
+```
+
+## 四、OpenTelemetry 兼容
+
+### 4.1 接收 OTEL 数据（规划中）
+
+AILens360 提供标准 OTLP 接收端点：
+
+```
+POST /v1/traces  (HTTP/JSON)
+gRPC :4317
+```
+
+允许已经用 OTEL 的应用直接把数据发给 AILens360（不走代理也能用）。
+
+### 4.2 导出到外部 OTEL 后端（规划中）
+
+控制台配置导出器，把 AILens360 的 trace 转发到：
+- Jaeger
+- Tempo
+- Datadog
+- 任何 OTLP 兼容后端
+
+## 五、未来扩展
+
+- **GraphQL API**：方便前端按需取字段
+- **Webhook**：trace 满足条件时回调（异常告警、特殊事件）
+- **批量 API**：批量导出 trace 用于离线分析

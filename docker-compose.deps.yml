@@ -1,0 +1,40 @@
+# 仅启动 ailens360 所需的基础设施（Postgres + Redis）。
+# 应用本身 (ailens360) 通过 `make build && ./bin/ailens360 server ...`
+# 在宿主机直接运行，方便开发与调试。生产环境再考虑容器化。
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ailens-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ailens
+      POSTGRES_PASSWORD: ailens
+      POSTGRES_DB: ailens360
+    ports:
+      - "5432:5432"
+    volumes:
+      - ailens-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ailens -d ailens360"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ailens-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ailens-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  ailens-pg:
+  ailens-redis:

@@ -1,0 +1,373 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── design tokens ───────────────────────────────────────────────── */
+:root {
+  /* Page chrome — a single solid neutral. A previous attempt used a 3-stop
+     linear gradient with very small RGB variance, but because the middle
+     stop was slightly warmer than the ends, the gradient became
+     non-monotonic (cool→warm→cool) which the eye reads as a horizontal
+     seam in empty regions. Solid wins. */
+  --bg-page: #f4f5fa;
+
+  /* glass surfaces — kept light, but the blur strength dropped from 24px to
+     14px so text on cards isn't constantly competing with a busy backdrop. */
+  --glass-bg:        rgba(255, 255, 255, 0.68);
+  --glass-bg-strong: rgba(255, 255, 255, 0.80);
+  --glass-bg-faint:  rgba(255, 255, 255, 0.55);
+  --glass-border:    rgba(255, 255, 255, 0.70);
+  --glass-line:      rgba(15, 23, 42, 0.07);
+
+  /* text scale — bumped one step up the slate ramp for comfort.
+     `ink-4` was slate-400 (#94a3b8) which fails WCAG AA on glass; now it's
+     slate-500 which is 4.86:1 on white — safe for sustained reading of
+     small metadata text (timestamps, IDs, labels). */
+  --ink:        #0f172a;     /* slate-900 — primary */
+  --ink-2:      #1e293b;     /* slate-800 — strong */
+  --ink-3:      #334155;     /* slate-700 — body / secondary */
+  --ink-4:      #64748b;     /* slate-500 — labels & metadata (was 400) */
+  --ink-5:      #94a3b8;     /* slate-400 — faint, rare use     (was 300) */
+
+  /* brand gradient — used for headlines, CTAs, the live dot */
+  --grad-1: #6366f1;   /* indigo-500 */
+  --grad-2: #8b5cf6;   /* violet-500 */
+  --grad-3: #06b6d4;   /* cyan-500 */
+  --brand:  #6366f1;
+  --brand-soft: rgba(99, 102, 241, 0.12);
+
+  /* status, slightly desaturated to feel premium */
+  --ok:    #10b981;
+  --warn:  #f59e0b;
+  --err:   #ef4444;
+  --info:  #3b82f6;
+
+  /* type */
+  --font-sans: 'Manrope', ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* shadows that read on glass */
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+  --shadow-2: 0 2px 6px rgba(15, 23, 42, 0.06), 0 24px 48px -12px rgba(67, 56, 202, 0.18);
+  --shadow-elev: 0 1px 0 rgba(255,255,255,0.8) inset, 0 1px 2px rgba(15,23,42,0.05), 0 12px 32px -8px rgba(67, 56, 202, 0.20);
+}
+
+/* ── base ────────────────────────────────────────────────────────── */
+html, body, #root { height: 100%; }
+html { font-family: var(--font-sans); }
+
+body {
+  position: relative;
+  color: var(--ink);
+  /* Single neutral background + one very faint radial wash at the top
+     for character. The wash decays to fully transparent so there's no
+     visible boundary anywhere on the page. */
+  background:
+    radial-gradient(ellipse 50% 35% at 50% -8%, rgba(165,180,252,0.09), transparent 70%),
+    var(--bg-page);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Decorative tint behind everything — STATIC, no motion. Constant peripheral
+   motion is a known cause of eye fatigue during long sessions, so we drop
+   the drift animation entirely and use just one very faint orb. */
+#bg-aura {
+  position: fixed; inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+#bg-aura .aura {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(120px);
+  opacity: 0.22;
+}
+.aura-indigo { width: 540px; height: 540px; background: #c7d2fe; top: -200px; left: -200px; }
+/* The other 3 orbs (violet/cyan/peach) are intentionally removed — one orb
+   gives the page a soft character; more was visual noise. */
+.aura-violet,
+.aura-cyan,
+.aura-peach { display: none; }
+
+#root { position: relative; z-index: 1; }
+
+/* ── glass primitives ────────────────────────────────────────────── */
+.glass {
+  background: var(--glass-bg);
+  /* Halved the blur (24→14) and dropped saturate boost. Heavy blur was the
+     #2 fatigue source after the bg motion — it forces the GPU to recompose
+     and makes text feel "soft" against a busy backdrop. */
+  backdrop-filter: blur(14px) saturate(110%);
+  -webkit-backdrop-filter: blur(14px) saturate(110%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-1);
+  border-radius: 22px;
+}
+.glass-strong {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(16px) saturate(115%);
+  -webkit-backdrop-filter: blur(16px) saturate(115%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-elev);
+  border-radius: 22px;
+}
+.glass-faint {
+  background: var(--glass-bg-faint);
+  backdrop-filter: blur(10px) saturate(105%);
+  -webkit-backdrop-filter: blur(10px) saturate(105%);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+}
+/* inner top highlight, the thing that makes glass feel "real" */
+.glass-edge::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 25%);
+  mix-blend-mode: overlay;
+}
+
+/* gradient text used for the hero headline & accents */
+.grad-text {
+  background: linear-gradient(135deg, var(--grad-1) 0%, var(--grad-2) 45%, var(--grad-3) 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+/* a pill chip with a gradient ring border (subtle) */
+.pill-ring {
+  position: relative;
+  background: var(--glass-bg-strong);
+  border-radius: 9999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  border: 1px solid var(--glass-border);
+}
+
+/* primary CTA — gradient fill, white text */
+.btn-grad {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 9999px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 60%, #06b6d4 100%);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.35) inset, 0 8px 22px -6px rgba(99,102,241,0.55);
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.btn-grad:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255,255,255,0.35) inset, 0 12px 28px -6px rgba(99,102,241,0.7); }
+.btn-grad:active { transform: translateY(0); }
+.btn-grad[disabled] { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+/* ghost pill — glass background with subtle border */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 9999px;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  transition: background .15s ease, border-color .15s ease;
+}
+.btn-ghost:hover { background: rgba(255,255,255,0.9); border-color: rgba(255,255,255,0.9); }
+
+/* the active nav pill */
+.nav-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 9999px;
+  font-weight: 600; font-size: 13.5px;
+  color: var(--ink-3);
+  transition: all .18s ease;
+}
+.nav-pill:hover { color: var(--ink); background: rgba(255,255,255,0.55); }
+.nav-pill.active {
+  color: var(--ink);
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.7) inset, 0 4px 14px -2px rgba(99,102,241,0.18);
+}
+
+/* mono code chip / snippet */
+.mono { font-family: var(--font-mono); }
+.code-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(15,23,42,0.04);
+  border: 1px solid rgba(15,23,42,0.06);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+/* Code blocks — tone-shifted from near-black to slate-800. The previous
+   #0b1220 produced a harsh light↔dark luminance switch every time the eye
+   moved between page and code; #1e293b is still clearly "code surface" but
+   pupils don't have to re-adapt as aggressively. */
+.codeblock {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #f1f5f9;          /* slate-100 — 12.6:1 on #1e293b, very readable */
+  background: #1e293b;     /* slate-800 */
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  padding: 14px 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 520px;
+}
+.codeblock-prefix {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: #f1f5f9;
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 14px;
+  padding: 12px 16px;
+  word-break: break-all;
+}
+.codeblock-header {
+  background: #111827;
+  color: #94a3b8;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.codeblock-frame {
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.codeblock-frame pre {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: #f1f5f9;
+  line-height: 1.65;
+  padding: 14px 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 280px;
+}
+
+/* numeric KPI */
+.kpi-num {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Selection — let the text keep its OWN color (inherit) so it stays readable
+   on both light glass cards (dark text) and dark code blocks (light text).
+   The old rule forced color: var(--ink) (slate-900), which made selected text
+   on the slate-800 code surface effectively invisible. */
+::selection { background: rgba(99, 102, 241, 0.30); }
+
+/* Inside dark code blocks bump the highlight strength and use a brighter
+   indigo so the selection rectangle is obvious against slate-800. */
+.codeblock ::selection,
+.codeblock::selection,
+.codeblock-prefix ::selection,
+.codeblock-prefix::selection,
+.codeblock-frame pre ::selection,
+.codeblock-frame pre::selection {
+  background: rgba(129, 140, 248, 0.45);  /* indigo-400 @ 45% */
+}
+
+/* scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(15, 23, 42, 0.28); background-clip: padding-box; }
+
+/* live dot */
+.live-dot {
+  width: 7px; height: 7px; border-radius: 999px;
+  background: var(--ok);
+  box-shadow: 0 0 0 0 rgba(16,185,129,.45);
+  animation: livePulse 2.2s ease-out infinite;
+}
+@keyframes livePulse {
+  0%   { box-shadow: 0 0 0 0 rgba(16,185,129,.45); }
+  70%  { box-shadow: 0 0 0 10px rgba(16,185,129,0); }
+  100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+}
+
+/* status dot for table rows */
+.dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; vertical-align: middle; }
+.dot.ok   { background: var(--ok); box-shadow: 0 0 0 3px rgba(16,185,129,0.18); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(245,158,11,0.18); }
+.dot.err  { background: var(--err); box-shadow: 0 0 0 3px rgba(239,68,68,0.18); }
+
+/* page reveal */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.reveal { opacity: 0; animation: fadeUp .55s cubic-bezier(.21,.61,.35,1) forwards; }
+.r-1 { animation-delay: .04s; }
+.r-2 { animation-delay: .10s; }
+.r-3 { animation-delay: .18s; }
+.r-4 { animation-delay: .26s; }
+.r-5 { animation-delay: .34s; }
+.r-6 { animation-delay: .42s; }
+
+/* skeleton shimmer */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skel {
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.4) 0%,
+    rgba(255,255,255,0.8) 50%,
+    rgba(255,255,255,0.4) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s linear infinite;
+  border-radius: 8px;
+}
+
+/* tabular numbers helper */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* HeroUI overlay: keep our orbs visible behind the drawer */
+[data-slot="backdrop"] {
+  background: rgba(15, 23, 42, 0.15) !important;
+  backdrop-filter: blur(8px) saturate(120%) !important;
+}
+
+/* override HeroUI focus ring to match brand */
+:where(input, button, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 1px;
+}

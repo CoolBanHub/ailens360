@@ -1,0 +1,17 @@
+.git
+.idea
+.vscode
+bin
+data
+dist
+logs
+tmp
+
+.env
+.env.*
+!.env.example
+
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/tsconfig.tsbuildinfo
