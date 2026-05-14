@@ -2,8 +2,10 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import type { ListResp, Trace } from '../../lib/types';
-import { fmtCost, fmtCostFine, fmtDur, fmtTokens, fmtTs } from '../../lib/fmt';
+import { fmtCost, fmtCostFine, fmtDur, fmtTs } from '../../lib/fmt';
 import ChatViewer from '../../components/ChatViewer';
+import { TokenCell } from '../../components/TokenCell';
+import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
 
 /* ── types ───────────────────────────────────────────────────── */
@@ -34,6 +36,11 @@ export default function TraceDetail() {
   const items = spansQ.data?.items ?? [];
   const first = items[0];
   const isSingleSpan = items.length === 1;
+  const statusLabel = (s: string) => {
+    const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
+    const v = tt(key);
+    return v === key ? s : v;
+  };
 
   // Selection model:
   //   multi-span, no `?span`  → trace summary (root row in tree)
@@ -60,9 +67,12 @@ export default function TraceDetail() {
   const last = items[items.length - 1];
   const tn = last ? new Date(last.CreatedAt).getTime() + (last.LatencyMs || 0) : 0;
   const totalDur   = tn - t0;
-  const totalIn    = items.reduce((s, x) => s + (x.InputTokens || 0), 0);
-  const totalOut   = items.reduce((s, x) => s + (x.OutputTokens || 0), 0);
-  const totalCost  = items.reduce((s, x) => s + (x.CostUSD || 0), 0);
+  const totalIn         = items.reduce((s, x) => s + (x.InputTokens || 0), 0);
+  const totalOut        = items.reduce((s, x) => s + (x.OutputTokens || 0), 0);
+  const totalCached     = items.reduce((s, x) => s + (x.CachedInputTokens || 0), 0);
+  const totalCacheWrite = items.reduce((s, x) => s + (x.CacheCreationInputTokens || 0), 0);
+  const totalReasoning  = items.reduce((s, x) => s + (x.ReasoningTokens || 0), 0);
+  const totalCost       = items.reduce((s, x) => s + (x.CostUSD || 0), 0);
   const worst = items.reduce(
     (acc, x) => x.Status === 'error' ? 'error'
                  : (x.Status === 'aborted' && acc !== 'error') ? 'aborted' : acc,
@@ -90,7 +100,7 @@ export default function TraceDetail() {
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                           text-[11px] font-semibold border ${toneCls(worst)}`}>
           <span className={`dot ${dotCls(worst)}`} />
-          {worst}
+          {statusLabel(worst)}
         </span>
       </header>
 
@@ -131,8 +141,20 @@ export default function TraceDetail() {
                     </div>
                     <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
                   </div>
-                  <div className="text-[10px] mono text-ink-4 mt-0.5">
-                    root · {items.length} spans · {fmtTokens(totalIn + totalOut)} tok · {fmtCost(totalCost)}
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <div className="text-[10px] mono text-ink-4">
+                      root · {items.length} spans · {fmtCost(totalCost)}
+                    </div>
+                    <TokenCell
+                      size="sm"
+                      tokens={{
+                        input: totalIn,
+                        output: totalOut,
+                        cached: totalCached,
+                        cacheCreate: totalCacheWrite,
+                        reasoning: totalReasoning,
+                      }}
+                    />
                   </div>
                 </button>
               )}
@@ -179,9 +201,23 @@ export default function TraceDetail() {
                         style={{ left: startPct + '%', width: durPct + '%' }}
                       />
                     </div>
-                    <div className="mt-1 flex justify-between text-[10px] mono text-ink-4">
+                    <div className="mt-1 flex justify-between items-center gap-2 text-[10px] mono text-ink-4">
                       <span>+{fmtDur(start)}</span>
-                      <span>{fmtTokens(s.TotalTokens)} tok · {fmtCostFine(s.CostUSD)}</span>
+                      <div className="flex items-center gap-2">
+                        <TokenCell
+                          size="sm"
+                          tokens={{
+                            input: s.InputTokens,
+                            output: s.OutputTokens,
+                            cached: s.CachedInputTokens,
+                            cacheCreate: s.CacheCreationInputTokens,
+                            reasoning: s.ReasoningTokens,
+                            total: s.TotalTokens,
+                            estimated: s.TokensEstimated,
+                          }}
+                        />
+                        <span>{fmtCostFine(s.CostUSD)}</span>
+                      </div>
                     </div>
                   </button>
                 );
@@ -202,6 +238,9 @@ export default function TraceDetail() {
               totalDur={totalDur}
               totalIn={totalIn}
               totalOut={totalOut}
+              totalCached={totalCached}
+              totalCacheWrite={totalCacheWrite}
+              totalReasoning={totalReasoning}
               totalCost={totalCost}
               startedAt={first?.CreatedAt}
               userId={first?.UserID}
@@ -234,6 +273,9 @@ interface TraceSummaryProps {
   totalDur: number;
   totalIn: number;
   totalOut: number;
+  totalCached: number;
+  totalCacheWrite: number;
+  totalReasoning: number;
   totalCost: number;
   startedAt?: string;
   userId?: string;
@@ -243,6 +285,11 @@ interface TraceSummaryProps {
 
 function TraceSummaryPanel(p: TraceSummaryProps) {
   const tt = useT();
+  const statusLabel = (s: string) => {
+    const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
+    const v = tt(key);
+    return v === key ? s : v;
+  };
   return (
     <div className="flex flex-col gap-3">
       {/* compact header */}
@@ -254,7 +301,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
           <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                             text-[11px] font-semibold border ${toneCls(p.status)}`}>
             <span className={`dot ${dotCls(p.status)}`} />
-            {p.status}
+            {statusLabel(p.status)}
           </span>
           <span className="ml-auto text-[11px] mono text-ink-4 select-all">{p.traceId}</span>
         </div>
@@ -263,7 +310,16 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
         <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-2">
           <Tile label={tt('detail.tile.spans')}    value={String(p.spanCount)} />
           <Tile label={tt('detail.tile.totalDur')} value={fmtDur(p.totalDur)} mono />
-          <Tile label={tt('detail.tile.tokens')}   value={fmtTokens(p.totalIn) + ' → ' + fmtTokens(p.totalOut)} mono />
+          <TokenTile
+            label={tt('detail.tile.tokens')}
+            tokens={{
+              input: p.totalIn,
+              output: p.totalOut,
+              cached: p.totalCached,
+              cacheCreate: p.totalCacheWrite,
+              reasoning: p.totalReasoning,
+            }}
+          />
           <Tile label={tt('detail.tile.cost')}     value={fmtCost(p.totalCost)} mono />
         </div>
 
@@ -273,25 +329,19 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
           {p.userId && (
             <>
               <Sep />
-              <Link
-                to={`/projects/${p.projectId}/traces?user_id=${encodeURIComponent(p.userId)}`}
-                className="mono text-indigo-600 hover:underline"
-                title={tt('detail.filter.byUser')}
-              >
-                user · {p.userId}
-              </Link>
+              <span className="inline-flex items-center gap-1">
+                <span className="text-ink-4">user</span>
+                <CopyableId value={p.userId} className="text-ink-2" />
+              </span>
             </>
           )}
           {p.sessionId && (
             <>
               <Sep />
-              <Link
-                to={`/projects/${p.projectId}/traces?session_id=${encodeURIComponent(p.sessionId)}`}
-                className="mono text-indigo-600 hover:underline"
-                title={tt('detail.filter.bySession')}
-              >
-                session · {p.sessionId}
-              </Link>
+              <span className="inline-flex items-center gap-1">
+                <span className="text-ink-4">session</span>
+                <CopyableId value={p.sessionId} className="text-ink-2" />
+              </span>
             </>
           )}
         </div>
@@ -325,10 +375,26 @@ function Tile({ label, value, mono }: { label: string; value: string; mono?: boo
   );
 }
 
+function TokenTile({ label, tokens }: { label: string; tokens: import('../../components/TokenCell').TokenStats }) {
+  return (
+    <div className="relative overflow-visible rounded-2xl border border-white/70 bg-white/55 px-3.5 py-3">
+      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-4 font-semibold">{label}</div>
+      <div className="mt-1.5">
+        <TokenCell tokens={tokens} size="md" align="left" />
+      </div>
+    </div>
+  );
+}
+
 /* ── span detail panel (was the inner of SpanDetail drawer) ──── */
 
 function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string; projectId?: string; showTraceMeta?: boolean }) {
   const tt = useT();
+  const statusLabel = (s: string) => {
+    const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
+    const v = tt(key);
+    return v === key ? s : v;
+  };
   const q = useQuery({
     queryKey: ['span', spanId],
     queryFn: () => api.get<Trace>('/traces/' + spanId),
@@ -360,7 +426,7 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
           <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                             text-[11px] font-semibold border ${toneCls(t.Status)}`}>
             <span className={`dot ${dotCls(t.Status)}`} />
-            {t.Status} · {t.StatusCode}
+            {statusLabel(t.Status)} · {t.StatusCode}
           </span>
           {t.IsStream && (
             <span className="text-[10px] uppercase tracking-[0.14em] text-indigo-600
@@ -380,23 +446,19 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
             {t.UserID && projectId && (
               <>
                 <Sep />
-                <Link
-                  to={`/projects/${projectId}/traces?user_id=${encodeURIComponent(t.UserID)}`}
-                  className="mono text-indigo-600 hover:underline"
-                >
-                  user · {t.UserID}
-                </Link>
+                <span className="inline-flex items-center gap-1">
+                  <span className="text-ink-4">user</span>
+                  <CopyableId value={t.UserID} className="text-ink-2" />
+                </span>
               </>
             )}
             {t.SessionID && projectId && (
               <>
                 <Sep />
-                <Link
-                  to={`/projects/${projectId}/traces?session_id=${encodeURIComponent(t.SessionID)}`}
-                  className="mono text-indigo-600 hover:underline"
-                >
-                  session · {t.SessionID}
-                </Link>
+                <span className="inline-flex items-center gap-1">
+                  <span className="text-ink-4">session</span>
+                  <CopyableId value={t.SessionID} className="text-ink-2" />
+                </span>
               </>
             )}
           </div>
@@ -406,16 +468,21 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5">
           <InlineMetric label={tt('detail.tile.latency')} value={fmtDur(t.LatencyMs || 0)} />
           <InlineMetric label="TTFT"                       value={fmtDur(t.TTFTMs)} />
-          <InlineMetric label={tt('detail.tile.tokens')}   value={fmtTokens(t.InputTokens) + ' → ' + fmtTokens(t.OutputTokens) + (t.TokensEstimated ? ' est' : '')} />
-          {t.ReasoningTokens > 0 && (
-            <InlineMetric label={tt('detail.tile.reasoning')} value={fmtTokens(t.ReasoningTokens)} />
-          )}
-          {t.CachedInputTokens > 0 && (
-            <InlineMetric label={tt('detail.tile.cacheRead')} value={fmtTokens(t.CachedInputTokens)} />
-          )}
-          {t.CacheCreationInputTokens > 0 && (
-            <InlineMetric label={tt('detail.tile.cacheWrite')} value={fmtTokens(t.CacheCreationInputTokens)} />
-          )}
+          <InlineMetricNode label={tt('detail.tile.tokens')}>
+            <TokenCell
+              size="sm"
+              align="left"
+              tokens={{
+                input: t.InputTokens,
+                output: t.OutputTokens,
+                cached: t.CachedInputTokens,
+                cacheCreate: t.CacheCreationInputTokens,
+                reasoning: t.ReasoningTokens,
+                total: t.TotalTokens,
+                estimated: t.TokensEstimated,
+              }}
+            />
+          </InlineMetricNode>
           <InlineMetric label={tt('detail.tile.cost')}     value={fmtCostFine(t.CostUSD)} />
         </div>
       </section>
@@ -464,6 +531,15 @@ function InlineMetric({ label, value, mono }: { label: string; value: string; mo
     <div className="flex items-baseline gap-1.5">
       <span className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold">{label}</span>
       <span className={(mono ? 'mono ' : '') + 'tnum text-[12.5px] text-ink font-medium'}>{value}</span>
+    </div>
+  );
+}
+
+function InlineMetricNode({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold">{label}</span>
+      {children}
     </div>
   );
 }

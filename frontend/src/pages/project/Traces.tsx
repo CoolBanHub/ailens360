@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import type { ListResp, TraceGroup } from '../../lib/types';
-import { fmtCost, fmtDur, fmtTokens, fmtTs } from '../../lib/fmt';
+import { fmtCost, fmtDur, fmtTs } from '../../lib/fmt';
+import { TokenCell } from '../../components/TokenCell';
+import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
 
 const statusTone = (s: string) =>
@@ -188,11 +190,11 @@ export default function ProjectTraces() {
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.trace')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.user')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.session')}</th>
-                  <th className="py-3.5 px-3 font-semibold text-right">{t('traces.col.spans')}</th>
+                  <th className="py-3.5 px-3 font-semibold text-right"><span className="inline-block -mr-[0.14em]">{t('traces.col.spans')}</span></th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.status')}</th>
-                  <th className="py-3.5 px-3 font-semibold text-right">{t('traces.col.latency')}</th>
-                  <th className="py-3.5 px-3 font-semibold text-right">{t('traces.col.tokens')}</th>
-                  <th className="py-3.5 px-3 pr-6 font-semibold text-right">{t('traces.col.cost')}</th>
+                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.latency')}</th>
+                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.tokens')}</th>
+                  <th className="py-3.5 px-3 pr-6 font-semibold text-right"><span className="inline-block -mr-[0.14em]">{t('traces.col.cost')}</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -223,27 +225,17 @@ export default function ProjectTraces() {
                         <div className="font-semibold text-ink leading-tight">
                           {g.TraceName || <span className="text-ink-4 font-normal italic">(unnamed)</span>}
                         </div>
-                        <div className="text-[11px] mono text-ink-4 mt-0.5">{g.TraceID}</div>
+                        <CopyableId value={g.TraceID} className="text-[11px] text-ink-4 mt-0.5" />
                       </td>
-                      <td className="py-3.5 px-3 mono text-[12px]">
-                        {g.UserID ? (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setUserId(g.UserID); }}
-                            className="text-indigo-600 hover:underline underline-offset-2"
-                          >
-                            {g.UserID}
-                          </button>
-                        ) : <span className="text-ink-4">—</span>}
+                      <td className="py-3.5 px-3">
+                        {g.UserID
+                          ? <div className="max-w-[160px]"><CopyableId value={g.UserID} className="text-[12px] text-ink-2 w-full" /></div>
+                          : <span className="mono text-[12px] text-ink-4">—</span>}
                       </td>
-                      <td className="py-3.5 px-3 mono text-[12px]">
-                        {g.SessionID ? (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setSessionId(g.SessionID); }}
-                            className="text-indigo-600 hover:underline underline-offset-2"
-                          >
-                            {g.SessionID}
-                          </button>
-                        ) : <span className="text-ink-4">—</span>}
+                      <td className="py-3.5 px-3">
+                        {g.SessionID
+                          ? <div className="max-w-[200px]"><CopyableId value={g.SessionID} className="text-[12px] text-ink-2 w-full" /></div>
+                          : <span className="mono text-[12px] text-ink-4">—</span>}
                       </td>
                       <td className="py-3.5 px-3 text-right tnum">
                         <span className="inline-flex items-center justify-center min-w-[26px]
@@ -259,8 +251,21 @@ export default function ProjectTraces() {
                           {statusLabel}
                         </span>
                       </td>
-                      <td className="py-3.5 px-3 text-right tnum text-ink-3">{fmtDur(g.LatencyMs)}</td>
-                      <td className="py-3.5 px-3 text-right tnum">{fmtTokens(g.TotalTokens)}</td>
+                      <td className="py-3.5 px-3 tnum text-ink-3">{fmtDur(g.LatencyMs)}</td>
+                      <td className="py-3.5 px-3 tnum">
+                        <TokenCell
+                          size="md"
+                          align="left"
+                          tokens={{
+                            input: g.InputTokens,
+                            output: g.OutputTokens,
+                            cached: g.CachedInputTokens,
+                            cacheCreate: g.CacheCreationInputTokens,
+                            reasoning: g.ReasoningTokens,
+                            total: g.TotalTokens,
+                          }}
+                        />
+                      </td>
                       <td className="py-3.5 px-3 pr-6 text-right tnum font-semibold">
                         {fmtCost(g.CostUSD)}
                       </td>

@@ -36,14 +36,16 @@ export default function ProjectOverview() {
   const items = usage.data?.items ?? [];
   const totals = items.reduce(
     (a, it) => ({
-      calls:  a.calls  + (it.Calls || 0),
-      input:  a.input  + (it.InputTokens || 0),
-      output: a.output + (it.OutputTokens || 0),
-      cost:   a.cost   + (it.CostUSD || 0),
-      avgLat: a.avgLat + (it.AvgLatencyMs || 0),
-      errN:   a.errN   + ((it.ErrorRate || 0) * (it.Calls || 0)),
+      calls:       a.calls       + (it.Calls || 0),
+      input:       a.input       + (it.InputTokens || 0),
+      output:      a.output      + (it.OutputTokens || 0),
+      cached:      a.cached      + (it.CachedInputTokens || 0),
+      cacheCreate: a.cacheCreate + (it.CacheCreationInputTokens || 0),
+      cost:        a.cost        + (it.CostUSD || 0),
+      avgLat:      a.avgLat      + (it.AvgLatencyMs || 0),
+      errN:        a.errN        + ((it.ErrorRate || 0) * (it.Calls || 0)),
     }),
-    { calls: 0, input: 0, output: 0, cost: 0, avgLat: 0, errN: 0 },
+    { calls: 0, input: 0, output: 0, cached: 0, cacheCreate: 0, cost: 0, avgLat: 0, errN: 0 },
   );
   const avgLatency = items.length ? Math.round(totals.avgLat / items.length) : 0;
   const errRate = totals.calls ? (totals.errN / totals.calls) * 100 : 0;
@@ -51,11 +53,12 @@ export default function ProjectOverview() {
   return (
     <div className="flex flex-col gap-5">
       {/* KPI tiles */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <BigKpi label={t('overview.kpi.calls')}     value={fmtNum(totals.calls)} />
-        <BigKpi label={t('overview.kpi.inTokens')}  value={fmtTokens(totals.input)} />
-        <BigKpi label={t('overview.kpi.outTokens')} value={fmtTokens(totals.output)} />
-        <BigKpi label={t('overview.kpi.cost')}      value={fmtCost(totals.cost)} />
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+        <BigKpi label={t('overview.kpi.calls')}        value={fmtNum(totals.calls)} />
+        <BigKpi label={t('overview.kpi.inTokens')}     value={fmtTokens(totals.input)} />
+        <BigKpi label={t('overview.kpi.outTokens')}    value={fmtTokens(totals.output)} />
+        <BigKpi label={t('overview.kpi.cacheTokens')}  value={fmtTokens(totals.cached + totals.cacheCreate)} />
+        <BigKpi label={t('overview.kpi.cost')}         value={fmtCost(totals.cost)} />
       </div>
 
       {/* second-row mini stats + recent traces side by side */}
