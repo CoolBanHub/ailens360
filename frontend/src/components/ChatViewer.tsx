@@ -65,8 +65,13 @@ export default function ChatViewer({ raw, mode }: Props) {
   const t = useT();
   const [view, setView] = useState<'pretty' | 'raw'>('pretty');
 
-  const parsed = parseJSON(raw);
-  const messages = extractMessages(parsed, mode);
+  // Streaming responses arrive as raw SSE (`data: {...}\n\n` frames) in `raw`.
+  // Reassemble them client-side so the pretty view can render the same chat
+  // bubble shape it uses for non-stream completions, while raw view still
+  // shows the original SSE bytes verbatim for debugging.
+  const messages = mode === 'response' && looksLikeOpenAISSE(raw)
+    ? assembleOpenAIStream(raw)
+    : extractMessages(parseJSON(raw), mode);
   // Render Pretty only when we found something useful; otherwise default to Raw
   const canPretty = messages.length > 0;
   const effective = canPretty ? view : 'raw';
@@ -130,6 +135,100 @@ function parseJSON(s: string | null | undefined): ChatPayload | null {
   if (!s) return null;
   try { return JSON.parse(s) as ChatPayload; }
   catch { return null; }
+}
+
+/* ── SSE assembly (streaming response → pretty message) ────── */
+
+// Treat the body as OpenAI-style SSE when at least one frame line begins
+// with `data: {`. Anthropic's typed events (`event: ...\ndata: {...}`) also
+// match — we'd need a different assembler for them, so be strict: only
+// accept frames whose payload looks like an OpenAI chunk (has `choices`).
+function looksLikeOpenAISSE(s: string | null | undefined): boolean {
+  if (!s) return false;
+  // Cheap pre-check before full parse.
+  if (!/^data:\s*\{/m.test(s)) return false;
+  for (const line of s.split('\n')) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const obj = JSON.parse(payload);
+      if (obj && Array.isArray(obj.choices)) return true;
+    } catch { /* malformed chunk — keep scanning */ }
+    return false;
+  }
+  return false;
+}
+
+interface OpenAIToolDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface OpenAIChunk {
+  choices?: Array<{
+    delta?: {
+      role?: string;
+      content?: string;
+      tool_calls?: OpenAIToolDelta[];
+    };
+    finish_reason?: string | null;
+  }>;
+}
+
+// assembleOpenAIStream concatenates `delta.content` and folds `tool_calls`
+// deltas (keyed by `index`, with progressively-streamed `function.arguments`)
+// back into a single assistant Message — same shape as a non-stream response,
+// so the existing MessageBubble can render it without special-casing streams.
+function assembleOpenAIStream(raw: string | null | undefined): Message[] {
+  if (!raw) return [];
+  let role: string = 'assistant';
+  let content = '';
+  const toolBuilders = new Map<number, { id?: string; type?: string; name?: string; args: string }>();
+  const toolOrder: number[] = [];
+
+  for (const line of raw.split('\n')) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    let chunk: OpenAIChunk;
+    try { chunk = JSON.parse(payload) as OpenAIChunk; } catch { continue; }
+    if (!Array.isArray(chunk.choices)) continue;
+    for (const choice of chunk.choices) {
+      const delta = choice.delta;
+      if (!delta) continue;
+      if (delta.role) role = delta.role;
+      if (typeof delta.content === 'string') content += delta.content;
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tcd of delta.tool_calls) {
+          const idx = tcd.index ?? 0;
+          let b = toolBuilders.get(idx);
+          if (!b) { b = { args: '' }; toolBuilders.set(idx, b); toolOrder.push(idx); }
+          if (tcd.id) b.id = tcd.id;
+          if (tcd.type) b.type = tcd.type;
+          if (tcd.function?.name) b.name = tcd.function.name;
+          if (tcd.function?.arguments) b.args += tcd.function.arguments;
+        }
+      }
+    }
+  }
+
+  if (!content && toolOrder.length === 0) return [];
+
+  const msg: Message = { role: role as Role, content };
+  if (toolOrder.length > 0) {
+    msg.tool_calls = toolOrder.map((idx) => {
+      const b = toolBuilders.get(idx)!;
+      return {
+        id: b.id,
+        type: b.type || 'function',
+        function: { name: b.name || '', arguments: b.args },
+      };
+    });
+  }
+  return [msg];
 }
 
 /**

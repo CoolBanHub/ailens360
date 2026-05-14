@@ -8,7 +8,6 @@ import { useT } from '../../i18n';
 
 /* ── types ───────────────────────────────────────────────────── */
 interface TimelineEvt { event: string; ts: number; }
-interface Chunk { seq?: number; ts?: number; delta_text?: string; }
 
 /* ── helpers ─────────────────────────────────────────────────── */
 const toneCls = (s: string) => {
@@ -34,13 +33,14 @@ export default function TraceDetail() {
 
   const items = spansQ.data?.items ?? [];
   const first = items[0];
+  const isSingleSpan = items.length === 1;
 
   // Selection model:
-  //   no `?span` param   → trace summary (root row in tree)
-  //   ?span=<id>         → that span's detail
-  // We do NOT auto-select anymore — the trace summary is the natural landing view.
-  const isRootSelected = !selectedSpan;
-  const activeSpanId   = selectedSpan || '';
+  //   multi-span, no `?span`  → trace summary (root row in tree)
+  //   ?span=<id>              → that span's detail
+  //   single-span             → always span detail (no separate root view)
+  const isRootSelected = !selectedSpan && !isSingleSpan;
+  const activeSpanId   = selectedSpan || (isSingleSpan && first ? first.ID : '');
 
   const selectRoot = () => {
     if (search.has('span')) {
@@ -110,28 +110,32 @@ export default function TraceDetail() {
             <div className="text-xs text-ink-4 p-4">{tt('detail.spans.empty')}</div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {/* clickable root row → trace summary view */}
-              <button
-                type="button"
-                onClick={selectRoot}
-                className={
-                  'text-left rounded-xl px-3 py-2 transition relative border ' +
-                  (isRootSelected
-                    ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
-                    : 'bg-white/60 border-white/70 hover:bg-white/85')
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500" />
-                  <div className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                    {first?.TraceName || '(unnamed)'}
+              {/* root row → trace summary view. Hidden for single-span traces
+                  since the lone span IS the trace and rendering both would
+                  duplicate identical info. */}
+              {!isSingleSpan && (
+                <button
+                  type="button"
+                  onClick={selectRoot}
+                  className={
+                    'text-left rounded-xl px-3 py-2 transition relative border ' +
+                    (isRootSelected
+                      ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
+                      : 'bg-white/60 border-white/70 hover:bg-white/85')
+                  }
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500" />
+                    <div className="font-semibold text-[12.5px] text-ink truncate flex-1">
+                      {first?.TraceName || '(unnamed)'}
+                    </div>
+                    <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
                   </div>
-                  <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
-                </div>
-                <div className="text-[10px] mono text-ink-4 mt-0.5">
-                  root · {items.length} spans · {fmtTokens(totalIn + totalOut)} tok · {fmtCost(totalCost)}
-                </div>
-              </button>
+                  <div className="text-[10px] mono text-ink-4 mt-0.5">
+                    root · {items.length} spans · {fmtTokens(totalIn + totalOut)} tok · {fmtCost(totalCost)}
+                  </div>
+                </button>
+              )}
 
               {items.map((s, i) => {
                 const start = new Date(s.CreatedAt).getTime() - t0;
@@ -205,7 +209,11 @@ export default function TraceDetail() {
               spans={items}
             />
           ) : (
-            <SpanDetailPanel spanId={activeSpanId} />
+            <SpanDetailPanel
+              spanId={activeSpanId}
+              projectId={projectId}
+              showTraceMeta={isSingleSpan}
+            />
           )}
         </section>
       </div>
@@ -319,7 +327,7 @@ function Tile({ label, value, mono }: { label: string; value: string; mono?: boo
 
 /* ── span detail panel (was the inner of SpanDetail drawer) ──── */
 
-function SpanDetailPanel({ spanId }: { spanId: string }) {
+function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string; projectId?: string; showTraceMeta?: boolean }) {
   const tt = useT();
   const q = useQuery({
     queryKey: ['span', spanId],
@@ -363,6 +371,37 @@ function SpanDetailPanel({ spanId }: { spanId: string }) {
           <span className="ml-auto text-[11px] mono text-ink-4 select-all">{t.ID}</span>
         </div>
 
+        {/* trace meta (user/session) is normally surfaced in the trace summary
+            panel. For single-span traces we render this panel directly with
+            no summary view, so opt-in render it here. */}
+        {showTraceMeta && (t.UserID || t.SessionID) && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-ink-3">
+            <span className="text-ink-4">{fmtTs(t.CreatedAt)}</span>
+            {t.UserID && projectId && (
+              <>
+                <Sep />
+                <Link
+                  to={`/projects/${projectId}/traces?user_id=${encodeURIComponent(t.UserID)}`}
+                  className="mono text-indigo-600 hover:underline"
+                >
+                  user · {t.UserID}
+                </Link>
+              </>
+            )}
+            {t.SessionID && projectId && (
+              <>
+                <Sep />
+                <Link
+                  to={`/projects/${projectId}/traces?session_id=${encodeURIComponent(t.SessionID)}`}
+                  className="mono text-indigo-600 hover:underline"
+                >
+                  session · {t.SessionID}
+                </Link>
+              </>
+            )}
+          </div>
+        )}
+
         {/* inline metrics ribbon — span-level only; user/session are already in the trace header */}
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5">
           <InlineMetric label={tt('detail.tile.latency')} value={fmtDur(t.LatencyMs || 0)} />
@@ -391,12 +430,6 @@ function SpanDetailPanel({ spanId }: { spanId: string }) {
         <SectionTitle>{tt(t.IsStream ? 'detail.section.streamResponse' : 'detail.section.response')}</SectionTitle>
         <ChatViewer raw={t.ResponseBody} mode="response" />
       </section>
-
-      {t.IsStream && (
-        <section className="glass glass-edge p-5">
-          <StreamChunksBlock raw={t.StreamChunks} title={tt('detail.section.streamChunks')} />
-        </section>
-      )}
 
       {/* ── Secondary details — collapsed by default ─────────────── */}
       <details className="glass glass-edge group">
@@ -483,40 +516,6 @@ function TimelineBlock({ raw, title }: { raw: string; title?: string }) {
             );
           })}
         </div>
-      </div>
-    </>
-  );
-}
-
-function StreamChunksBlock({ raw, title }: { raw: string; title?: string }) {
-  const tt = useT();
-  let chunks: Chunk[] = [];
-  try { chunks = JSON.parse(raw || '[]') as Chunk[]; } catch { /* */ }
-  if (!Array.isArray(chunks) || chunks.length === 0) {
-    return (
-      <>
-        <SectionTitle>{title || tt('detail.section.streamChunks')}</SectionTitle>
-        <div className="text-xs text-ink-4">—</div>
-      </>
-    );
-  }
-  const t0 = chunks[0].ts || 0;
-  return (
-    <>
-      <h3 className="text-[11px] uppercase tracking-[0.16em] text-ink-4 font-bold mb-3 flex items-baseline gap-2">
-        <span>{title || tt('detail.section.streamChunks')}</span>
-        <span className="text-ink-4 tracking-normal normal-case text-[11px] font-normal">× {chunks.length}</span>
-      </h3>
-      <div className="rounded-2xl bg-white/55 border border-white/70 max-h-[440px] overflow-auto">
-        {chunks.map((c, i) => (
-          <div key={i}
-               className="flex gap-3 text-[12px] mono px-3.5 py-1.5
-                          border-b border-[color:var(--glass-line)] last:border-0">
-            <span className="w-10 text-ink-4 shrink-0">#{c.seq ?? i}</span>
-            <span className="w-16 text-ink-4 text-right tnum shrink-0">+{fmtDur((c.ts || 0) - t0)}</span>
-            <span className="flex-1 break-all whitespace-pre-wrap text-ink">{c.delta_text || ''}</span>
-          </div>
-        ))}
       </div>
     </>
   );

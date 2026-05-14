@@ -54,6 +54,11 @@ type openaiChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
+			// We don't reassemble tool_calls server-side (the UI does that
+			// from the raw SSE), but we DO need to know whether a tool-call
+			// delta arrived so the stream timeline picks up FirstToken /
+			// LastToken — otherwise tool-call-only responses look aborted.
+			ToolCalls []json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -104,20 +109,31 @@ func (p *OpenAIParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 		p.model = c.Model
 	}
 	delta := ""
+	sawToolDelta := false
 	for _, ch := range c.Choices {
 		if ch.Delta.Content != "" {
 			delta += ch.Delta.Content
+		}
+		if len(ch.Delta.ToolCalls) > 0 {
+			sawToolDelta = true
 		}
 		if ch.FinishReason != nil && *ch.FinishReason != "" {
 			p.finishReason = *ch.FinishReason
 		}
 	}
 	if delta != "" {
-		if p.textBuilder.Len() == 0 && onFirstToken != nil {
-			onFirstToken(now)
+		p.textBuilder.WriteString(delta)
+	}
+	// Update timeline on any meaningful generated content — text OR tool
+	// calls. Otherwise tool-call-only streams have a zero LastToken and the
+	// proxy mislabels them as "aborted".
+	if delta != "" || sawToolDelta {
+		if tl.FirstToken.IsZero() {
+			if onFirstToken != nil {
+				onFirstToken(now)
+			}
 			tl.FirstToken = now
 		}
-		p.textBuilder.WriteString(delta)
 		tl.LastToken = now
 	}
 	if c.Usage != nil {

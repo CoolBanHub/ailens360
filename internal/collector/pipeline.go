@@ -186,7 +186,6 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 	}
 
 	timelineJSON, _ := json.Marshal(buildTimelineEntries(tl))
-	chunksJSON, _ := json.Marshal(ev.StreamChunks)
 	reqHdr, _ := json.Marshal(ev.RequestHeaders)
 	respHdr, _ := json.Marshal(ev.ResponseHeaders)
 
@@ -195,26 +194,33 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 		respBody = string(ev.ResponseBody)
 	}
 
+	logicTraceID := ev.LogicTraceID
+	if logicTraceID == "" {
+		logicTraceID = ev.TraceID
+	}
+
 	t := &repo.Trace{
-		ID:                       ev.TraceID,
-		TraceID:                  ev.LogicTraceID,
-		TraceName:                ev.TraceName,
-		ProjectID:                ev.ProjectID,
-		UserID:                   ev.UserID,
-		SessionID:                ev.SessionID,
-		Tags:                     ev.Tags,
-		Provider:                 ev.Provider,
-		Model:                    ev.Model,
-		IsStream:                 ev.IsStream,
-		Status:                   ev.Status,
-		StatusCode:               ev.StatusCode,
-		ErrorMessage:             ev.ErrorMsg,
-		RequestHeaders:           string(reqHdr),
-		RequestBody:              string(ev.RequestBody),
-		RequestPath:              ev.RequestPath,
-		ResponseHeaders:          string(respHdr),
-		ResponseBody:             respBody,
-		StreamChunks:             string(chunksJSON),
+		ID:              ev.TraceID,
+		TraceID:         logicTraceID,
+		TraceName:       ev.TraceName,
+		ProjectID:       ev.ProjectID,
+		UserID:          ev.UserID,
+		SessionID:       ev.SessionID,
+		Tags:            ev.Tags,
+		Provider:        ev.Provider,
+		Model:           ev.Model,
+		IsStream:        ev.IsStream,
+		Status:          ev.Status,
+		StatusCode:      ev.StatusCode,
+		ErrorMessage:    ev.ErrorMsg,
+		RequestHeaders:  string(reqHdr),
+		RequestBody:     string(ev.RequestBody),
+		RequestPath:     ev.RequestPath,
+		ResponseHeaders: string(respHdr),
+		ResponseBody:    respBody,
+		// Per-chunk SSE records used to be persisted here for a "stream
+		// chunks" debug view that nobody used; ChunkCount above is enough.
+		StreamChunks:             "",
 		Timeline:                 string(timelineJSON),
 		InputTokens:              ev.InputTokens,
 		OutputTokens:             ev.OutputTokens,

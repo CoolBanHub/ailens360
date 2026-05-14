@@ -44,6 +44,30 @@ func TestOpenAIParserStreamCollectsTextAndUsage(t *testing.T) {
 	}
 }
 
+// Tool-call-only streams still produce a valid generation — every chunk has
+// `delta.tool_calls` and an empty `delta.content`. The parser must mark
+// FirstToken / LastToken on tool-call deltas too, otherwise downstream code
+// (handler.go) sees LastToken==0 and labels the response "aborted".
+func TestOpenAIParserStreamMarksTimelineForToolCallOnly(t *testing.T) {
+	body := "" +
+		`data: {"model":"gpt-4o","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	p := NewOpenAIParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	var firstTokenAt time.Time
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) { firstTokenAt = ts })
+
+	if firstTokenAt.IsZero() {
+		t.Fatal("FirstToken not stamped — tool-call-only stream will look like it never produced anything")
+	}
+	if tl.LastToken.IsZero() {
+		t.Fatal("LastToken not stamped — handler will mislabel this stream as aborted")
+	}
+}
+
 func TestOpenAIParserNonStream(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","choices":[{"message":{"content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
 	p := NewOpenAIParser()
