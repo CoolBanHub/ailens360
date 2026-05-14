@@ -120,7 +120,7 @@ func (c *Config) Defaults() {
 		c.Proxy.IdleTimeout = 120 * time.Second
 	}
 	if c.Proxy.MaxRequestBody == 0 {
-		c.Proxy.MaxRequestBody = 10 << 20
+		c.Proxy.MaxRequestBody = 32 << 20
 	}
 	if c.Proxy.UpstreamTimeout == 0 {
 		c.Proxy.UpstreamTimeout = 5 * time.Minute
@@ -165,7 +165,7 @@ func (c *Config) Defaults() {
 		c.Collector.FlushInterval = time.Second
 	}
 	if c.Collector.RawBodyLimit == 0 {
-		c.Collector.RawBodyLimit = 256 << 10
+		c.Collector.RawBodyLimit = 8 << 20
 	}
 	if c.Auth.Username == "" {
 		c.Auth.Username = "admin"

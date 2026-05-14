@@ -162,6 +162,8 @@ export const zh = {
   'detail.filter.bySession': '按 session 过滤',
   'detail.spans.empty':      '没有 spans',
   'detail.noData':           '没有数据',
+  'detail.text.expand':      '…展开（还有 {count} 个字符）',
+  'detail.text.collapse':    '收起',
 
   // project settings
   'settings.section.basic':       '基本信息',
@@ -194,7 +196,7 @@ export const zh = {
   'setup.step1.resetNotice': '旧密钥会立即失效，所有客户端需要同步换上新值。',
   'setup.step1.resetDone':   '✓ 已生成新 project_key',
 
-  'setup.step2.title':       '挑一个 provider 直接拷贝拼好的 URL',
+  'setup.step2.title':       '挑一个上游端点直接拷贝拼好的 URL',
   'setup.step2.hint':        '每行就是你 SDK 里 base_url 该填的值。Authorization 头里继续放你真实的上游 API Key，AILens360 不持有也不替换。',
 
   'setup.step3.title':       '在代码里替换 baseURL + 注入项目密钥',
@@ -378,6 +380,8 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.filter.bySession': 'Filter by session',
   'detail.spans.empty':      'No spans',
   'detail.noData':           'No data',
+  'detail.text.expand':      '…expand ({count} more characters)',
+  'detail.text.collapse':    'collapse',
 
   'settings.section.basic':       'Basics',
   'settings.basic.hint':          'The project name is for display only.',
@@ -408,7 +412,7 @@ export const en: Record<keyof typeof zh, string> = {
   'setup.step1.resetNotice': 'The old key is revoked immediately; every client must roll to the new value.',
   'setup.step1.resetDone':   '✓ New project_key generated',
 
-  'setup.step2.title':       'Pick a provider and copy the ready-made URL',
+  'setup.step2.title':       'Pick an upstream endpoint and copy the ready-made URL',
   'setup.step2.hint':        'Each line is the value to plug into base_url in your SDK. Keep your real upstream API Key in the Authorization header — AILens360 never holds or replaces it.',
 
   'setup.step3.title':       'Swap baseURL in code + inject the project key',

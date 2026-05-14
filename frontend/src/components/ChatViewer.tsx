@@ -410,10 +410,45 @@ function ContentPartView({ part }: { part: ContentPart }) {
   );
 }
 
+// Threshold above which TextBlock starts collapsed. Picked to keep a long
+// system prompt readable at a glance (first ~8 lines or ~600 chars) without
+// requiring a click to scan a short user message.
+const COLLAPSE_MIN_CHARS = 600;
+const COLLAPSE_MIN_LINES = 8;
+const COLLAPSE_PREVIEW_CHARS = 600;
+const COLLAPSE_PREVIEW_LINES = 8;
+
 function TextBlock({ children }: { children: string }) {
+  const t = useT();
+  const lineCount = children.split('\n').length;
+  const needsCollapse = children.length > COLLAPSE_MIN_CHARS || lineCount > COLLAPSE_MIN_LINES;
+  const [expanded, setExpanded] = useState(false);
+
+  if (!needsCollapse) {
+    return (
+      <div className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
+        {children}
+      </div>
+    );
+  }
+
+  // Preview = whichever cap kicks in first: char limit or line limit.
+  const lines = children.split('\n');
+  const byLines = lines.slice(0, COLLAPSE_PREVIEW_LINES).join('\n');
+  const byChars = children.slice(0, COLLAPSE_PREVIEW_CHARS);
+  const preview = byLines.length <= byChars.length ? byLines : byChars;
+  const remaining = children.length - preview.length;
+
   return (
     <div className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
-      {children}
+      {expanded ? children : preview}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="mt-1.5 block text-[12px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline"
+      >
+        {expanded ? t('detail.text.collapse') : t('detail.text.expand', { count: remaining })}
+      </button>
     </div>
   );
 }

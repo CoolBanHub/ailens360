@@ -9,6 +9,8 @@ import ProjectTraceDetail from './pages/project/TraceDetail';
 import ProjectSetup from './pages/project/Setup';
 import ProjectSettings from './pages/project/Settings';
 import { getAuth, subscribe } from './lib/auth';
+import { useT } from './i18n';
+import type { LocaleKey } from './i18n/locales';
 
 function useAuthed() {
   const [authed, setAuthed] = useState(!!getAuth().token);
@@ -23,8 +25,38 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+const BRAND = 'AILens360';
+
+function moduleTitleKey(path: string): LocaleKey | null {
+  if (path === '/login') return 'login.submit';
+  if (path === '/projects' || path === '/projects/') return 'nav.allProjects';
+  const m = path.match(/^\/projects\/[^/]+\/([^/]+)/);
+  if (!m) return null;
+  switch (m[1]) {
+    case 'overview': return 'nav.module.overview';
+    case 'traces':   return 'nav.module.traces';
+    case 'sessions': return 'nav.module.sessions';
+    case 'users':    return 'nav.module.users';
+    case 'setup':    return 'nav.module.setup';
+    case 'settings': return 'nav.module.settings';
+    default: return null;
+  }
+}
+
+function DocumentTitle() {
+  const loc = useLocation();
+  const t = useT();
+  useEffect(() => {
+    const key = moduleTitleKey(loc.pathname);
+    document.title = key ? `${t(key)} | ${BRAND}` : BRAND;
+  }, [loc.pathname, t]);
+  return null;
+}
+
 export default function App() {
   return (
+    <>
+    <DocumentTitle />
     <Routes>
       <Route path="/login" element={<Login />} />
 
@@ -59,5 +91,6 @@ export default function App() {
       <Route path="/" element={<Navigate to="/projects" replace />} />
       <Route path="*" element={<Navigate to="/projects" replace />} />
     </Routes>
+    </>
   );
 }

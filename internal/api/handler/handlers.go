@@ -246,22 +246,27 @@ func (h *Handlers) ListTraceGroups(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Facets returns the distinct model values seen for a project, used to
-// populate the trace-filter model dropdown. Ordered by frequency (desc) and
-// capped at 200 entries.
+// Facets returns the dynamic filter inputs and an existence flag for the
+// trace-list UI:
+//   - `models`: distinct non-empty model names seen in the project, ordered
+//     by frequency (desc), capped at 200 entries — populates the dropdown.
+//   - `has_data`: whether the project has any trace at all (including ones
+//     with empty model) — lets the UI tell "no traces yet" apart from
+//     "filters exclude everything".
 func (h *Handlers) Facets(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" {
 		response.Error(w, http.StatusBadRequest, 40000, "project_id required")
 		return
 	}
-	models, err := h.Traces.Facets(r.Context(), projectID)
+	models, hasAny, err := h.Traces.Facets(r.Context(), projectID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, 50001, err.Error())
 		return
 	}
 	response.OK(w, map[string]any{
-		"models": models,
+		"models":   models,
+		"has_data": hasAny,
 	})
 }
 

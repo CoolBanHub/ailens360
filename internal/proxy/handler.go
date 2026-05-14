@@ -40,7 +40,7 @@ type Deps struct {
 func NewHandler(d Deps) *Handler {
 	limit := d.RawLimit
 	if limit <= 0 {
-		limit = 256 << 10
+		limit = 8 << 20
 	}
 	timeout := d.Timeout
 	if timeout <= 0 {

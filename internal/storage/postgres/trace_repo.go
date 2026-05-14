@@ -356,8 +356,18 @@ func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, e
 	return out, rows.Err()
 }
 
-func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []string, err error) {
-	return distinctNonEmpty(ctx, r.pool, "model", projectID)
+func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []string, hasAny bool, err error) {
+	models, err = distinctNonEmpty(ctx, r.pool, "model", projectID)
+	if err != nil {
+		return nil, false, err
+	}
+	// Fast existence check independent of the model column — covers traces
+	// with an empty / unparseable model that wouldn't show up in `models`.
+	if err = r.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM traces WHERE project_id=$1)`, projectID).Scan(&hasAny); err != nil {
+		return nil, false, err
+	}
+	return models, hasAny, nil
 }
 
 // distinctNonEmpty returns the distinct non-empty values of `col` for a given

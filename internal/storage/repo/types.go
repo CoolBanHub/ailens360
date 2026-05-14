@@ -140,7 +140,10 @@ type TraceRepo interface {
 	List(ctx context.Context, f ListTraceFilter) ([]*Trace, int64, error)
 	ListGroups(ctx context.Context, f ListTraceGroupFilter) ([]*TraceGroup, int64, error)
 	UsageByDimension(ctx context.Context, dim string, startMs, endMs int64, projectID string) ([]UsageStat, error)
-	// Facets returns the distinct models seen for a project, in descending
-	// count order. Used to populate the trace-filter model dropdown.
-	Facets(ctx context.Context, projectID string) (models []string, err error)
+	// Facets returns dynamic filter inputs for the trace-list UI. `models` is
+	// the distinct non-empty model names seen in the project (desc by count,
+	// drives the dropdown). `hasAny` reports whether ANY trace exists for the
+	// project — empty-model traces still count — so the UI can pick between
+	// the onboarding "project has no data" and the "no matches" empty states.
+	Facets(ctx context.Context, projectID string) (models []string, hasAny bool, err error)
 }

@@ -19,7 +19,7 @@ const TIME_PRESETS: Record<Exclude<TimeKey, '' | 'custom'>, number> = {
   '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
-interface Facets { models: string[]; }
+interface Facets { models: string[]; has_data: boolean; }
 
 // "2026-05-13T10:00" (datetime-local) → unix ms, in user's local TZ.
 function localToMs(s: string): number | null {
@@ -62,7 +62,7 @@ export default function ProjectTraces() {
     queryFn: () => api.get<Facets>('/trace_facets?project_id=' + encodeURIComponent(projectId)),
     staleTime: 60_000,
   });
-  const facets = facetsQ.data ?? { models: [] };
+  const facets = facetsQ.data ?? { models: [], has_data: false };
 
   const groups = useQuery({
     // queryKey holds only stable filter inputs. "Now" is computed inside
@@ -100,9 +100,10 @@ export default function ProjectTraces() {
     setModel(''); setStatus('');
     setTimeRange('');
   }
-  // Facets being populated is our signal that the project has ingested traces
-  // at some point — used to pick between the two empty states below.
-  const projectHasData = facets.models.length > 0;
+  // Authoritative existence flag from the facets endpoint — covers traces
+  // with empty/unknown model that would otherwise miss the model-facet
+  // signal. Used to pick between onboarding empty vs. no-match empty.
+  const projectHasData = facets.has_data;
 
   return (
     <div className="flex flex-col gap-5">
