@@ -42,8 +42,8 @@ func (r *recordingTraceRepo) UsageByDimension(context.Context, string, int64, in
 	return nil, nil
 }
 
-func (r *recordingTraceRepo) Facets(context.Context, string) ([]string, []string, error) {
-	return nil, nil, nil
+func (r *recordingTraceRepo) Facets(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 
 func (r *recordingTraceRepo) count() int {

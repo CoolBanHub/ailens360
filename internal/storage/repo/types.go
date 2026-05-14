@@ -30,7 +30,6 @@ type Trace struct {
 	UserID                   string // X-AILens-User on the inbound request
 	SessionID                string // X-AILens-Session
 	Tags                     string // X-AILens-Tag, comma-separated
-	Provider                 string
 	Model                    string
 	IsStream                 bool
 	Status                   string // success | error | aborted
@@ -68,7 +67,6 @@ type ListTraceFilter struct {
 	TraceID     string
 	UserID      string
 	SessionID   string
-	Provider    string
 	Model       string
 	Status      string
 	StartUnixMs int64
@@ -128,7 +126,6 @@ type ListTraceGroupFilter struct {
 	SessionID   string
 	TraceName   string // exact match on traces.trace_name
 	Status      string // success | error | aborted — uses "worst-of-span" via subquery
-	Provider    string // matches if ANY span in the trace uses this provider
 	Model       string // matches if ANY span in the trace uses this model
 	StartUnixMs int64
 	EndUnixMs   int64
@@ -143,7 +140,7 @@ type TraceRepo interface {
 	List(ctx context.Context, f ListTraceFilter) ([]*Trace, int64, error)
 	ListGroups(ctx context.Context, f ListTraceGroupFilter) ([]*TraceGroup, int64, error)
 	UsageByDimension(ctx context.Context, dim string, startMs, endMs int64, projectID string) ([]UsageStat, error)
-	// Facets returns the distinct providers and models seen for a project,
-	// in descending count order. Used to populate dynamic filter dropdowns.
-	Facets(ctx context.Context, projectID string) (providers, models []string, err error)
+	// Facets returns the distinct models seen for a project, in descending
+	// count order. Used to populate the trace-filter model dropdown.
+	Facets(ctx context.Context, projectID string) (models []string, err error)
 }

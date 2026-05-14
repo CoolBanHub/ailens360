@@ -19,7 +19,7 @@ const TIME_PRESETS: Record<Exclude<TimeKey, '' | 'custom'>, number> = {
   '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
-interface Facets { providers: string[]; models: string[]; }
+interface Facets { models: string[]; }
 
 // "2026-05-13T10:00" (datetime-local) → unix ms, in user's local TZ.
 function localToMs(s: string): number | null {
@@ -36,14 +36,6 @@ function defaultLocalDateTime(offsetMs = 0): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-const PROVIDER_LABEL: Record<string, string> = {
-  openai:    'OpenAI',
-  anthropic: 'Anthropic',
-  gemini:    'Gemini',
-  google:    'Google',
-  azure:     'Azure',
-};
-
 export default function ProjectTraces() {
   const { projectId = '' } = useParams();
   const nav = useNavigate();
@@ -55,7 +47,6 @@ export default function ProjectTraces() {
   const [sessionId,  setSessionId]  = useState(search.get('session_id') || '');
   const [traceName,  setTraceName]  = useState(search.get('trace_name') || '');
   const [model,      setModel]      = useState(search.get('model')      || '');
-  const [provider,   setProvider]   = useState(search.get('provider')   || '');
   const [status,     setStatus]     = useState<StatusKey>((search.get('status') as StatusKey) || '');
   const [timeRange,  setTimeRange]  = useState<TimeKey>((search.get('time') as TimeKey) || '24h');
   // Custom datetime-local strings (e.g. "2026-05-13T10:00"). Only used when timeRange === 'custom'.
@@ -64,20 +55,20 @@ export default function ProjectTraces() {
   // Auto-refresh is opt-in. Polls every 10s when enabled, off otherwise.
   const [autoRefresh, setAutoRefresh] = useState(false);
 
-  // Facets: distinct providers + models for this project, drive the dropdowns.
+  // Facets: distinct models for this project, drives the model dropdown.
   const facetsQ = useQuery({
     queryKey: ['proj-trace_facets', projectId],
     enabled: !!projectId,
     queryFn: () => api.get<Facets>('/trace_facets?project_id=' + encodeURIComponent(projectId)),
     staleTime: 60_000,
   });
-  const facets = facetsQ.data ?? { providers: [], models: [] };
+  const facets = facetsQ.data ?? { models: [] };
 
   const groups = useQuery({
     // queryKey holds only stable filter inputs. "Now" is computed inside
     // queryFn at fetch time — otherwise Date.now() on every render would
     // change the key and trigger a fetch storm.
-    queryKey: ['proj-trace_groups', projectId, userId, sessionId, traceName, model, provider, status, timeRange, customStart, customEnd],
+    queryKey: ['proj-trace_groups', projectId, userId, sessionId, traceName, model, status, timeRange, customStart, customEnd],
     queryFn: () => {
       const startMs = timeRange === 'custom' ? localToMs(customStart) :
                       timeRange !== '' ? Date.now() - TIME_PRESETS[timeRange] : null;
@@ -87,7 +78,6 @@ export default function ProjectTraces() {
       if (sessionId) q.set('session_id', sessionId);
       if (traceName) q.set('trace_name', traceName);
       if (model)     q.set('model', model);
-      if (provider)  q.set('provider', provider);
       if (status)    q.set('status', status);
       if (startMs != null) q.set('start_time', String(startMs));
       if (endMs   != null) q.set('end_time',   String(endMs));
@@ -104,15 +94,15 @@ export default function ProjectTraces() {
   // Non-default time = anything other than "all"; treat it as an active filter
   // for the purpose of the empty-state message ("no matches in this window")
   // versus the project's onboarding empty-state ("project has no traces yet").
-  const hasActiveFilter = !!(userId || sessionId || traceName || model || provider || status || timeRange !== '');
+  const hasActiveFilter = !!(userId || sessionId || traceName || model || status || timeRange !== '');
   function clearAll() {
     setUserId(''); setSessionId(''); setTraceName('');
-    setModel(''); setProvider(''); setStatus('');
+    setModel(''); setStatus('');
     setTimeRange('');
   }
   // Facets being populated is our signal that the project has ingested traces
   // at some point — used to pick between the two empty states below.
-  const projectHasData = facets.providers.length > 0 || facets.models.length > 0;
+  const projectHasData = facets.models.length > 0;
 
   return (
     <div className="flex flex-col gap-5">
@@ -141,15 +131,6 @@ export default function ProjectTraces() {
               ['aborted',  t('traces.status.aborted')],
             ]}
             onChange={(v) => setStatus(v as StatusKey)}
-          />
-          <FilterMenu
-            label={t('traces.filter.provider')}
-            value={provider}
-            options={[
-              ['', t('traces.filter.all')],
-              ...facets.providers.map<[string, string]>((p) => [p, PROVIDER_LABEL[p] ?? p]),
-            ]}
-            onChange={setProvider}
           />
           <FilterMenu
             label={t('traces.filter.model')}

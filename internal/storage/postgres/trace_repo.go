@@ -19,13 +19,13 @@ func NewTraceRepo(pool *pgxpool.Pool) *TraceRepo { return &TraceRepo{pool: pool}
 
 // traceCols intentionally lists columns in the order required by INSERT/SELECT
 // and CopyFrom — keep it in sync with traceCopyCols below.
-const traceCols = `id, trace_id, trace_name, project_id, user_id, session_id, tags, provider, model, is_stream, status, status_code, error_message,
+const traceCols = `id, trace_id, trace_name, project_id, user_id, session_id, tags, model, is_stream, status, status_code, error_message,
 		request_headers, request_body, request_path, response_headers, response_body, stream_chunks, timeline,
 		input_tokens, output_tokens, total_tokens, reasoning_tokens, cached_input_tokens, cache_creation_input_tokens, tokens_estimated, cost_usd, latency_ms,
 		ttft_ms, ttfb_ms, gen_duration_ms, tps, chunk_count, bytes_streamed, finish_reason, stream_status, created_at`
 
 var traceCopyCols = []string{
-	"id", "trace_id", "trace_name", "project_id", "user_id", "session_id", "tags", "provider", "model", "is_stream",
+	"id", "trace_id", "trace_name", "project_id", "user_id", "session_id", "tags", "model", "is_stream",
 	"status", "status_code", "error_message",
 	"request_headers", "request_body", "request_path", "response_headers", "response_body", "stream_chunks", "timeline",
 	"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cached_input_tokens", "cache_creation_input_tokens",
@@ -39,8 +39,8 @@ func (r *TraceRepo) Create(ctx context.Context, t *repo.Trace) error {
 	}
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO traces(`+traceCols+`)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, $14,$15,$16,$17,$18,$19,$20, $21,$22,$23,$24,$25,$26,$27,$28,$29, $30,$31,$32,$33,$34,$35,$36,$37, $38)`,
-		t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Provider, t.Model, t.IsStream,
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, $13,$14,$15,$16,$17,$18,$19, $20,$21,$22,$23,$24,$25,$26,$27,$28, $29,$30,$31,$32,$33,$34,$35,$36, $37)`,
+		t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Model, t.IsStream,
 		t.Status, t.StatusCode, t.ErrorMessage,
 		t.RequestHeaders, t.RequestBody, t.RequestPath, t.ResponseHeaders, t.ResponseBody, t.StreamChunks, t.Timeline,
 		t.InputTokens, t.OutputTokens, t.TotalTokens, t.ReasoningTokens, t.CachedInputTokens, t.CacheCreationInputTokens,
@@ -63,7 +63,7 @@ func (r *TraceRepo) BatchCreate(ctx context.Context, ts []*repo.Trace) error {
 			t.CreatedAt = time.Now()
 		}
 		rows = append(rows, []any{
-			t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Provider, t.Model, t.IsStream,
+			t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Model, t.IsStream,
 			t.Status, t.StatusCode, t.ErrorMessage,
 			t.RequestHeaders, t.RequestBody, t.RequestPath, t.ResponseHeaders, t.ResponseBody, t.StreamChunks, t.Timeline,
 			t.InputTokens, t.OutputTokens, t.TotalTokens, t.ReasoningTokens, t.CachedInputTokens, t.CacheCreationInputTokens,
@@ -128,10 +128,6 @@ func (r *TraceRepo) List(ctx context.Context, f repo.ListTraceFilter) ([]*repo.T
 	if f.SessionID != "" {
 		where = append(where, "session_id=?")
 		args = append(args, f.SessionID)
-	}
-	if f.Provider != "" {
-		where = append(where, "provider=?")
-		args = append(args, f.Provider)
 	}
 	if f.Model != "" {
 		where = append(where, "model=?")
@@ -207,10 +203,6 @@ func (r *TraceRepo) ListGroups(ctx context.Context, f repo.ListTraceGroupFilter)
 	if f.TraceName != "" {
 		where = append(where, "trace_name=?")
 		args = append(args, f.TraceName)
-	}
-	if f.Provider != "" {
-		where = append(where, "provider=?")
-		args = append(args, f.Provider)
 	}
 	if f.Model != "" {
 		where = append(where, "model=?")
@@ -304,8 +296,6 @@ func (r *TraceRepo) ListGroups(ctx context.Context, f repo.ListTraceGroupFilter)
 func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, endMs int64, projectID string) ([]repo.UsageStat, error) {
 	keyCol := ""
 	switch dim {
-	case "provider":
-		keyCol = "provider"
 	case "model":
 		keyCol = "model"
 	case "project":
@@ -366,16 +356,8 @@ func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, e
 	return out, rows.Err()
 }
 
-func (r *TraceRepo) Facets(ctx context.Context, projectID string) (providers, models []string, err error) {
-	providers, err = distinctNonEmpty(ctx, r.pool, "provider", projectID)
-	if err != nil {
-		return nil, nil, err
-	}
-	models, err = distinctNonEmpty(ctx, r.pool, "model", projectID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return providers, models, nil
+func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []string, err error) {
+	return distinctNonEmpty(ctx, r.pool, "model", projectID)
 }
 
 // distinctNonEmpty returns the distinct non-empty values of `col` for a given
@@ -407,7 +389,7 @@ func scanTrace(s rowScanner) (*repo.Trace, error) {
 	var t repo.Trace
 	var ttft, ttfb, gen *int64
 	var createdMs int64
-	if err := s.Scan(&t.ID, &t.TraceID, &t.TraceName, &t.ProjectID, &t.UserID, &t.SessionID, &t.Tags, &t.Provider, &t.Model,
+	if err := s.Scan(&t.ID, &t.TraceID, &t.TraceName, &t.ProjectID, &t.UserID, &t.SessionID, &t.Tags, &t.Model,
 		&t.IsStream, &t.Status, &t.StatusCode, &t.ErrorMessage,
 		&t.RequestHeaders, &t.RequestBody, &t.RequestPath, &t.ResponseHeaders, &t.ResponseBody, &t.StreamChunks, &t.Timeline,
 		&t.InputTokens, &t.OutputTokens, &t.TotalTokens, &t.ReasoningTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,

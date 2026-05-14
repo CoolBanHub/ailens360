@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/CoolBanHub/ailens360/internal/project"
-	"github.com/CoolBanHub/ailens360/internal/provider"
 	"github.com/CoolBanHub/ailens360/internal/proxy/intercept"
 	"github.com/CoolBanHub/ailens360/internal/proxy/stream"
 	"github.com/CoolBanHub/ailens360/pkg/shortid"
@@ -121,7 +120,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 			"upstream URL must be absolute with scheme (e.g. https://api.openai.com/...)")
 		return
 	}
-	prov := provider.DetectFromHost(upstreamURL.Host)
 
 	// Extract telemetry metadata from internal headers BEFORE they get stripped
 	// off the outbound request. These promote the X-AILens-* convention to
@@ -191,9 +189,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	tl.UpstreamRequestOut = time.Now()
 	resp, err := h.httpClient.Do(outReq)
 	if err != nil {
-		h.logger.Error("upstream request failed", "err", err, "provider", prov.Name, "host", upstreamURL.Host)
+		h.logger.Error("upstream request failed", "err", err, "host", upstreamURL.Host)
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
-		h.emitError(reqBodyCopy, model, isStream, proj.ID, prov.Name, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0)
+		h.emitError(reqBodyCopy, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0)
 		return
 	}
 	defer resp.Body.Close()
@@ -207,7 +205,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	parser := stream.NewParser(prov.Name)
+	parser := stream.NewParserForHost(upstreamURL.Host)
 	cw := intercept.NewCapturingWriter(w, h.rawLimit, nil)
 
 	contentType := resp.Header.Get("Content-Type")
@@ -246,7 +244,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		TraceID:         "tr_" + shortid.MustNew(16),
 		IsStream:        streaming,
 		Model:           model,
-		Provider:        prov.Name,
 		StatusCode:      statusCode,
 		ProjectID:       proj.ID,
 		UserID:          userID,
@@ -283,13 +280,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	h.sink.Submit(ev)
 }
 
-func (h *Handler) emitError(reqBody []byte, model string, isStream bool, projectID, providerName, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int) {
+func (h *Handler) emitError(reqBody []byte, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int) {
 	tl.ResponseOut = time.Now()
 	ev := &stream.Event{
 		TraceID:      "tr_" + shortid.MustNew(16),
 		IsStream:     isStream,
 		Model:        model,
-		Provider:     providerName,
 		StatusCode:   status,
 		Status:       "error",
 		StreamStatus: "errored",

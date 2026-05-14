@@ -161,13 +161,20 @@ func capRaw(raw []byte) string {
 }
 
 // Finalize collects the parsing result into the given Event.
+//
+// Token normalization: OpenAI reports prompt_tokens as the FULL prompt (cached
+// tokens included as a subset). We subtract the cached portion so the
+// downstream Event field carries the same "uncached input only" semantics that
+// pricing.Cost (and tier resolution) expect — matching Anthropic's native
+// shape. This lets billing run a single non-branching formula regardless of
+// upstream.
 func (p *OpenAIParser) Finalize(ev *Event) {
 	ev.ResponseText = p.textBuilder.String()
 	ev.StreamChunks = p.chunks
 	ev.ChunkCount = len(p.chunks)
 	ev.FinishReason = p.finishReason
 	if p.tokensFromUsage {
-		ev.InputTokens = p.totalIn
+		ev.InputTokens = max(p.totalIn-p.cachedInToks, 0)
 		ev.OutputTokens = p.totalOut
 		ev.TotalTokens = p.totalAll
 		ev.ReasoningTokens = p.reasoningToks
@@ -206,10 +213,11 @@ func (p *OpenAIParser) ParseNonStream(body []byte, ev *Event) {
 		}
 	}
 	if resp.Usage != nil {
-		ev.InputTokens = resp.Usage.PromptTokens
+		cached := resp.Usage.cachedTokens()
+		ev.InputTokens = max(resp.Usage.PromptTokens-cached, 0)
 		ev.OutputTokens = resp.Usage.CompletionTokens
 		ev.TotalTokens = resp.Usage.TotalTokens
-		ev.CachedInputTokens = resp.Usage.cachedTokens()
+		ev.CachedInputTokens = cached
 		ev.ReasoningTokens = resp.Usage.reasoningTokens()
 		ev.TokensEstimated = false
 	}

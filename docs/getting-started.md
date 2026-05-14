@@ -192,7 +192,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 curl -H "Authorization: Bearer $TOKEN" \
   'http://localhost:8080/api/trace_groups?project_id=prj_01HV...&limit=20'
 
-# 用量聚合（dimension: model | provider | project | day | hour）
+# 用量聚合（dimension: model | project | day | hour）
 curl -H "Authorization: Bearer $TOKEN" \
   'http://localhost:8080/api/metrics/usage?dimension=model&start_time=...&end_time=...'
 ```

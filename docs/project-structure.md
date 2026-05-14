@@ -33,12 +33,12 @@ ailens360/
 │   │   ├── sink.go                    # trace 异步落库 sink
 │   │   ├── intercept/                 # ResponseWriter 拦截器（同时写客户端 + buffer）
 │   │   └── stream/                    # SSE / chunked 流处理
-│   │       ├── parser.go              # 通用 SSE 帧解析
+│   │       ├── parser.go              # 通用 SSE 帧解析；NewParserForHost(host) 按上游 host 选解析器
 │   │       ├── openai_parser.go       # OpenAI 事件归一化
 │   │       ├── anthropic_parser.go    # Anthropic 事件归一化
 │   │       ├── gemini_parser.go       # Gemini 事件归一化
 │   │       └── types.go               # StreamEvent / Timeline / 派生指标
-│   │   # 所有 provider 共用一个 pass-through 转发器；provider 仅按上游 host 推断。
+│   │   # 所有上游共用一个 pass-through 转发器；SSE 解析器按上游 host 在 stream 包内部分流。
 │   │
 │   ├── api/                           # 【控制台 API】给 Web Console 用
 │   │   ├── router.go                  # chi 路由组装
@@ -51,7 +51,6 @@ ailens360/
 │   ├── auth/                          # 控制台 JWT 服务
 │   ├── collector/                     # channel pipeline + 批量落库
 │   ├── project/                       # Project CRUD + project_key resolver
-│   ├── provider/                      # host → provider tag 识别
 │   ├── cache/                         # L1 LRU + L2 Redis + Pub/Sub 失效广播
 │   ├── metrics/                       # Redis 实时计数器
 │   ├── tokenizer/                     # tiktoken（OpenAI）+ Anthropic / Gemini 估算
@@ -152,24 +151,23 @@ type ProjectRepo interface {
 
 不引入 Wire / Fx。`internal/app/app.go` 显式按顺序构造：日志 → 配置 → DB / Redis → 仓储 → 缓存 → 业务 service → handler → HTTP server。显式即文档，IDE 跳转友好，单测最容易写。
 
-### 2.5 Provider 识别与 Stream 解析器
+### 2.5 Stream 解析器选择
 
-历史上曾通过 `internal/proxy/adapter/` 注册"每个 provider 一个完整 Adapter"。当前架构下，所有 provider **共用一个 pass-through 转发器**（上游 URL 完全由客户端在 baseURL 中指定），仅 SSE 解析器按 provider tag 分流：
+历史上曾通过 `internal/proxy/adapter/` 注册"每个 provider 一个完整 Adapter"。当前架构下，所有上游 **共用一个 pass-through 转发器**（上游 URL 完全由客户端在 baseURL 中指定），仅 SSE 解析器按上游 host 在 `stream` 包内部分流：
 
 ```go
-// internal/provider/detect.go
-// host 命中 anthropic → "anthropic"
-// host 命中 googleapis / generativelanguage → "gemini"
-// 其它 → "openai"（OpenAI Chat Completions 是事实标准）
-
-// internal/proxy/stream/parser.go 根据 tag 选择
-//   openai_parser / anthropic_parser / gemini_parser
+// internal/proxy/stream/parser.go
+// host 含 anthropic → anthropic_parser
+// host 含 googleapis / generativelanguage → gemini_parser
+// 其它 → openai_parser（OpenAI Chat Completions 是事实标准）
 ```
+
+外部没有 "provider" 概念——trace 不打厂商标签，控制台也不按厂商筛选。
 
 新增上游兼容只需：
 
 1. 协议是 OpenAI Chat Completions 兼容（DeepSeek / Groq / Together / Moonshot / 本地 vLLM 等）：**不需要改代码**，客户端写完整 baseURL 即可。
-2. 新协议族：在 `internal/provider/detect.go` 加 host 规则，并在 `internal/proxy/stream/` 新增解析器。
+2. 新协议族：在 `internal/proxy/stream/parser.go` 的 `NewParserForHost` 加 host 规则，并在 `internal/proxy/stream/` 新增解析器。
 
 ## 三、为什么不用 Kratos / Gin 等框架
 

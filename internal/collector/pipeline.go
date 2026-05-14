@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -177,7 +176,6 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 		Output:        ev.OutputTokens,
 		CachedInput:   ev.CachedInputTokens,
 		CacheCreation: ev.CacheCreationInputTokens,
-		ContextTokens: contextSize(ev),
 	})
 
 	var tps float64
@@ -213,7 +211,6 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 		UserID:          ev.UserID,
 		SessionID:       ev.SessionID,
 		Tags:            ev.Tags,
-		Provider:        ev.Provider,
 		Model:           ev.Model,
 		IsStream:        ev.IsStream,
 		Status:          ev.Status,
@@ -251,25 +248,6 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 		t.CreatedAt = time.Now()
 	}
 	return t
-}
-
-// contextSize computes the prompt-side context for tier-pricing lookup. The
-// upstreams report token usage with different semantics:
-//
-//   - OpenAI / Gemini: ev.InputTokens already includes the cached portion, so
-//     it IS the context.
-//   - Anthropic: ev.InputTokens is uncached only — cached + cache_creation are
-//     reported separately and must be added back.
-//   - Unknown providers: fall back to Anthropic-style addition. Overshooting
-//     tier on a non-tiered model is harmless (no tier matches); undershooting
-//     on a tiered model would silently undercharge.
-func contextSize(ev *stream.Event) int {
-	switch strings.ToLower(ev.Provider) {
-	case "openai", "gemini", "google":
-		return ev.InputTokens
-	default:
-		return ev.InputTokens + ev.CachedInputTokens + ev.CacheCreationInputTokens
-	}
 }
 
 type timelineEntry struct {

@@ -103,19 +103,23 @@ func (p *GeminiParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 	p.chunks = append(p.chunks, rec)
 }
 
+// Token normalization: Gemini's promptTokenCount is the FULL prompt
+// (cachedContentTokenCount is a subset). We subtract cached so the Event
+// carries "uncached input only" semantics that billing assumes — see the
+// equivalent OpenAI parser comment.
 func (p *GeminiParser) Finalize(ev *Event) {
 	ev.ResponseText = p.textBuilder.String()
 	ev.StreamChunks = p.chunks
 	ev.ChunkCount = len(p.chunks)
 	ev.FinishReason = p.finishReason
 	if p.usageSeen {
-		ev.InputTokens = p.inputTokens
+		ev.InputTokens = max(p.inputTokens-p.cachedInToks, 0)
 		ev.OutputTokens = p.outputTokens
 		ev.TotalTokens = p.totalTokens
 		ev.ReasoningTokens = p.reasoningToks
 		ev.CachedInputTokens = p.cachedInToks
 		if ev.TotalTokens == 0 {
-			ev.TotalTokens = ev.InputTokens + ev.OutputTokens
+			ev.TotalTokens = ev.InputTokens + ev.CachedInputTokens + ev.OutputTokens
 		}
 		ev.TokensEstimated = false
 	}
@@ -143,11 +147,12 @@ func (p *GeminiParser) ParseNonStream(body []byte, ev *Event) {
 	}
 	ev.ResponseText = sb.String()
 	if c.UsageMetadata != nil {
-		ev.InputTokens = c.UsageMetadata.PromptTokenCount
+		cached := c.UsageMetadata.CachedContentTokenCount
+		ev.InputTokens = max(c.UsageMetadata.PromptTokenCount-cached, 0)
 		ev.OutputTokens = c.UsageMetadata.CandidatesTokenCount
 		ev.TotalTokens = c.UsageMetadata.TotalTokenCount
 		ev.ReasoningTokens = c.UsageMetadata.ThoughtsTokenCount
-		ev.CachedInputTokens = c.UsageMetadata.CachedContentTokenCount
+		ev.CachedInputTokens = cached
 		ev.TokensEstimated = false
 	}
 }

@@ -63,7 +63,7 @@ func Mount(r chi.Router, d RouterDeps) {
 		r.Get("/metrics/usage", h.Usage)
 		// Live realtime counters from Redis (last N seconds, near real-time).
 		r.Get("/metrics/live", h.Live)
-		// Distinct providers + models per project — powers filter dropdowns.
+		// Distinct models per project — powers the model filter dropdown.
 		r.Get("/trace_facets", h.Facets)
 	})
 }

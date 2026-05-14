@@ -136,10 +136,10 @@ func (p *AnthropicParser) Finalize(ev *Event) {
 		ev.OutputTokens = p.outputTokens
 		ev.CachedInputTokens = p.cacheReadToks
 		ev.CacheCreationInputTokens = p.cacheCreateToks
-		// Anthropic bills cache_creation_input_tokens separately from
-		// input_tokens; surface that in the total so cost-of-call totals add
-		// up to what the upstream charges.
-		ev.TotalTokens = p.inputTokens + p.outputTokens + p.cacheCreateToks
+		// Anthropic reports input_tokens as UNCACHED only — cache_read and
+		// cache_creation are tracked separately and bill at their own rates.
+		// Total billable units = uncached + cached + cache_creation + output.
+		ev.TotalTokens = p.inputTokens + p.cacheReadToks + p.cacheCreateToks + p.outputTokens
 		ev.TokensEstimated = false
 	}
 	if p.model != "" && ev.Model == "" {
@@ -179,7 +179,7 @@ func (p *AnthropicParser) ParseNonStream(body []byte, ev *Event) {
 		ev.OutputTokens = resp.Usage.OutputTokens
 		ev.CachedInputTokens = resp.Usage.CacheReadInputTokens
 		ev.CacheCreationInputTokens = resp.Usage.CacheCreationInputTokens
-		ev.TotalTokens = ev.InputTokens + ev.OutputTokens + ev.CacheCreationInputTokens
+		ev.TotalTokens = ev.InputTokens + ev.CachedInputTokens + ev.CacheCreationInputTokens + ev.OutputTokens
 		ev.TokensEstimated = false
 	}
 }

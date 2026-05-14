@@ -86,28 +86,25 @@ func (p PricePerMTok) Effective(contextSize int) PricePerMTok {
 	return base
 }
 
-// TokenUsage is the breakdown the pipeline hands to Cost(). All fields are raw
-// counts (not deltas). Cached and CacheCreation are NOT subtracted from Input
-// by the caller — Cost() handles the math.
+// TokenUsage is the breakdown the pipeline hands to Cost(). All fields are
+// disjoint categories — no overlap, no subtraction needed downstream:
 //
-// Provider semantics for Input/CachedInput differ:
+//   - Input         = uncached prompt tokens (billed at the input rate)
+//   - CachedInput   = cache-read tokens (billed at the cache_read rate)
+//   - CacheCreation = cache-write tokens (billed at the cache_write rate; Anthropic only)
+//   - Output        = completion tokens
 //
-//   - OpenAI / Gemini: Input is the full prompt token count and CachedInput
-//     is a subset of it.
-//   - Anthropic: Input is uncached only; CachedInput (cache_read) and
-//     CacheCreation are separate from it.
+// The stream parsers normalize upstream usage payloads to this shape regardless
+// of provider — OpenAI/Gemini parsers subtract cached tokens from prompt_tokens
+// before populating Input, so Input always carries "uncached only" semantics.
 //
-// ContextTokens disambiguates this for tier resolution. The pipeline is
-// responsible for computing it correctly per provider; Cost() falls back to
-// Input + CachedInput*(0 if OpenAI/Gemini-style) approximations only when
-// ContextTokens is 0 (legacy callers).
+// ContextTokens optionally overrides the prompt-side context size used for
+// tier resolution. When 0, the resolver uses Input + CachedInput + CacheCreation.
 type TokenUsage struct {
-	Input         int // see provider semantics above
+	Input         int
 	Output        int
-	CachedInput   int // discounted cache-read portion
-	CacheCreation int // Anthropic-only; billed separately from Input
-	// ContextTokens is the prompt-side context size used for tier matching.
-	// 0 means "compute heuristically" (see resolveContextSize).
+	CachedInput   int
+	CacheCreation int
 	ContextTokens int
 }
 
@@ -145,15 +142,16 @@ func (c *Catalog) Size() int {
 	return len(*p)
 }
 
-// Cost returns the USD cost of a request, factoring cached-input discount and
-// cache-creation surcharge. Unknown models return 0.
+// Cost returns the USD cost of a request. The four token categories on
+// TokenUsage are disjoint and each multiplies its own rate — no subtraction,
+// no provider branching:
 //
-//	billed_input = (Input - CachedInput) * input + CachedInput * cache_read
-//	billed_cache_write = CacheCreation * cache_write
-//	billed_output      = Output * output
+//	billed = Input         * input
+//	       + CachedInput   * cache_read     (falls back to input rate when unpriced)
+//	       + CacheCreation * cache_write    (falls back to input rate when unpriced)
+//	       + Output        * output
 //
-// When a price table entry omits CacheRead, the discount falls back to the
-// full input price (effectively no discount). Same for CacheWrite.
+// Unknown models return 0.
 func (c *Catalog) Cost(model string, u TokenUsage) float64 {
 	if model == "" {
 		return 0
@@ -163,7 +161,6 @@ func (c *Catalog) Cost(model string, u TokenUsage) float64 {
 		return 0
 	}
 	p := raw.Effective(resolveContextSize(u))
-	uncached := max(u.Input-u.CachedInput, 0)
 	cacheReadRate := p.CacheRead
 	if cacheReadRate == 0 {
 		cacheReadRate = p.Input
@@ -172,24 +169,20 @@ func (c *Catalog) Cost(model string, u TokenUsage) float64 {
 	if cacheWriteRate == 0 {
 		cacheWriteRate = p.Input
 	}
-	return float64(uncached)/1e6*p.Input +
+	return float64(u.Input)/1e6*p.Input +
 		float64(u.CachedInput)/1e6*cacheReadRate +
 		float64(u.CacheCreation)/1e6*cacheWriteRate +
 		float64(u.Output)/1e6*p.Output
 }
 
-// resolveContextSize falls back to a best-effort estimate when the caller
-// didn't set ContextTokens. We assume Anthropic-style separation (cached and
-// cache_creation NOT included in Input) because it overestimates context for
-// OpenAI/Gemini at worst, which is the safer direction: tier prices are
-// always higher, so overshooting tier means overcharging — visible — instead
-// of undercharging — silent. Pipelines that know the provider should always
-// set ContextTokens explicitly.
+// resolveContextSize returns the prompt-side context size used for tier
+// matching. Because TokenUsage carries disjoint categories (Input is uncached
+// only, CachedInput and CacheCreation are tracked separately), the prompt
+// size is just their sum — same formula for every provider.
 func resolveContextSize(u TokenUsage) int {
 	if u.ContextTokens > 0 {
 		return u.ContextTokens
 	}
-	// Conservative fallback: treat all three as additive.
 	return u.Input + u.CachedInput + u.CacheCreation
 }
 

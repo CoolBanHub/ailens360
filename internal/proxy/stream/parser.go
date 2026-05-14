@@ -2,6 +2,7 @@ package stream
 
 import (
 	"io"
+	"strings"
 	"time"
 )
 
@@ -20,13 +21,15 @@ type Parser interface {
 	ParseNonStream(body []byte, ev *Event)
 }
 
-// NewParser returns the right Parser for the given provider. Unknown providers
-// fall back to the OpenAI parser, which is the broadest format in the wild.
-func NewParser(provider string) Parser {
-	switch provider {
-	case "anthropic":
+// NewParserForHost returns the right Parser for an upstream host. Only the SSE
+// wire format matters here — DeepSeek, Groq, Together, Moonshot and local vLLM
+// all speak OpenAI's Chat Completions SSE, so the default branch covers them.
+func NewParserForHost(host string) Parser {
+	h := strings.ToLower(host)
+	switch {
+	case strings.Contains(h, "anthropic"):
 		return NewAnthropicParser()
-	case "gemini":
+	case strings.Contains(h, "googleapis"), strings.Contains(h, "generativelanguage"):
 		return NewGeminiParser()
 	default:
 		return NewOpenAIParser()

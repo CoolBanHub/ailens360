@@ -21,7 +21,6 @@ type Event struct {
 	TraceID  string
 	IsStream bool
 	Model    string
-	Provider string
 
 	StatusCode   int
 	Status       string // success | error | aborted

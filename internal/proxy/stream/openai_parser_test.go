@@ -124,11 +124,17 @@ func TestOpenAIParserCapturesReasoningAndCacheTokens(t *testing.T) {
 	if ev.CachedInputTokens != 60 {
 		t.Fatalf("cached: got %d want 60", ev.CachedInputTokens)
 	}
+	// OpenAI reports prompt_tokens INCLUDING cached; the parser normalizes it
+	// to "uncached only" so pricing can use disjoint categories.
+	if ev.InputTokens != 40 {
+		t.Fatalf("input (uncached): got %d want 40", ev.InputTokens)
+	}
 }
 
 func TestOpenAIParserDeepSeekStyleCacheTokens(t *testing.T) {
 	// DeepSeek reports cache hit/miss at the usage root rather than under
-	// prompt_tokens_details — verify the parser picks it up.
+	// prompt_tokens_details — verify the parser picks it up AND normalizes
+	// prompt_tokens by subtracting the hit portion.
 	body := []byte(`{"model":"deepseek-chat","choices":[{"message":{"content":"x"},"finish_reason":"stop"}],
 		"usage":{"prompt_tokens":120,"completion_tokens":10,"total_tokens":130,
 			"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":40,
@@ -138,6 +144,9 @@ func TestOpenAIParserDeepSeekStyleCacheTokens(t *testing.T) {
 	p.ParseNonStream(body, ev)
 	if ev.CachedInputTokens != 80 {
 		t.Fatalf("cached: got %d want 80", ev.CachedInputTokens)
+	}
+	if ev.InputTokens != 40 {
+		t.Fatalf("input (uncached): got %d want 40", ev.InputTokens)
 	}
 	if ev.ReasoningTokens != 3 {
 		t.Fatalf("reasoning: got %d want 3", ev.ReasoningTokens)
@@ -152,15 +161,19 @@ func TestAnthropicParserCapturesCacheTokens(t *testing.T) {
 	p := NewAnthropicParser()
 	ev := &Event{}
 	p.ParseNonStream(body, ev)
+	if ev.InputTokens != 80 {
+		t.Fatalf("input (uncached): got %d want 80", ev.InputTokens)
+	}
 	if ev.CachedInputTokens != 1200 {
 		t.Fatalf("cache_read: got %d want 1200", ev.CachedInputTokens)
 	}
 	if ev.CacheCreationInputTokens != 50 {
 		t.Fatalf("cache_creation: got %d want 50", ev.CacheCreationInputTokens)
 	}
-	// Anthropic bills cache creation separately, so it must be added to the total.
-	if ev.TotalTokens != 80+10+50 {
-		t.Fatalf("total: got %d want %d", ev.TotalTokens, 80+10+50)
+	// All four categories are disjoint and bill at distinct rates, so the
+	// total billable units is their sum.
+	if ev.TotalTokens != 80+1200+50+10 {
+		t.Fatalf("total: got %d want %d", ev.TotalTokens, 80+1200+50+10)
 	}
 }
 
@@ -181,6 +194,10 @@ func TestGeminiParserCapturesThoughtsAndCacheTokens(t *testing.T) {
 	}
 	if ev.CachedInputTokens != 30 {
 		t.Fatalf("cached: got %d want 30", ev.CachedInputTokens)
+	}
+	// Gemini reports promptTokenCount INCLUDING cached; the parser subtracts.
+	if ev.InputTokens != 20 {
+		t.Fatalf("input (uncached): got %d want 20", ev.InputTokens)
 	}
 }
 

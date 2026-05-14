@@ -162,7 +162,7 @@ export default function TraceDetail() {
                       <span className="mono text-[10px] text-ink-4 w-5">#{i + 1}</span>
                       <span className={`dot ${dotTone}`} />
                       <span className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                        {s.Provider} · {s.Model}
+                        {s.Model}
                       </span>
                       {s.IsStream && (
                         <span className="text-[8.5px] uppercase tracking-[0.14em] text-indigo-600
@@ -355,7 +355,7 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
           <h2 className="text-[17px] font-bold tracking-tight">
             {t.IsStream ? 'Stream' : 'Generate'}
             <span className="text-ink-4 font-normal mx-1.5">·</span>
-            <span className="mono text-[14px] text-ink-2">{t.Provider} / {t.Model}</span>
+            <span className="mono text-[14px] text-ink-2">{t.Model}</span>
           </h2>
           <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                             text-[11px] font-semibold border ${toneCls(t.Status)}`}>

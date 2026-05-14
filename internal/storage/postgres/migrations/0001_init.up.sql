@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS traces (
     user_id            TEXT NOT NULL DEFAULT '',
     session_id         TEXT NOT NULL DEFAULT '',
     tags               TEXT NOT NULL DEFAULT '',
-    provider           TEXT NOT NULL,
     model              TEXT NOT NULL,
     is_stream          BOOLEAN NOT NULL DEFAULT FALSE,
     status             TEXT NOT NULL,
@@ -53,7 +52,6 @@ CREATE TABLE IF NOT EXISTS traces (
     created_at         BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_traces_project_created  ON traces(project_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_traces_provider         ON traces(provider, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_traces_model            ON traces(model, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_traces_status           ON traces(status);
 CREATE INDEX IF NOT EXISTS idx_traces_user_created     ON traces(user_id, created_at DESC);

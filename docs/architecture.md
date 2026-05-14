@@ -98,14 +98,14 @@
   - 项目身份由 `X-AILens-Project-Key` 请求头识别；缺失头返回 401 `missing_project_key`
   - `project_key` 在创建 Project 时生成（64 位 base62，约 381 bits 熵），控制台支持「重置」轮换；轮换会同步从缓存 evict 旧 key 并广播
   - 三层缓存：进程内 LRU（L1）→ Redis（L2）→ Postgres（L3），Project 写路径 evict 时通过 Redis Pub/Sub 广播到其他副本
-  - Project 仅承载归因与统计隔离，不保存上游 provider / 真实 API Key / baseURL
-- **Provider tag 仅按 host 推断**：调用 `DetectFromHost(upstream.Host)`
-  - host 含 `anthropic` → `anthropic`
-  - host 含 `googleapis` 或 `generativelanguage` → `gemini`
-  - 其他一律 → `openai`（默认，覆盖所有 OpenAI Chat Completions 兼容上游）
-  - **推断结果只用于**：(1) 挑选对应的 SSE 流解析器；(2) 给 trace 打 provider 标签。**转发目标 URL 完全由客户端 URL 中的内嵌上游决定，与 provider 名字无关**。
-- **统一 pass-through 转发**：所有 provider 共用一个透传转发器
-  - provider 特有的请求头（如 Anthropic 的 `anthropic-version`）由客户端 SDK 自己设置，代理不注入
+  - Project 仅承载归因与统计隔离，不保存上游 / 真实 API Key / baseURL
+- **SSE 解析器按 host 在内部选择**：`stream.NewParserForHost(upstream.Host)`
+  - host 含 `anthropic` → Anthropic 解析器
+  - host 含 `googleapis` 或 `generativelanguage` → Gemini 解析器
+  - 其他一律 → OpenAI 解析器（默认，覆盖所有 OpenAI Chat Completions 兼容上游）
+  - **仅影响**流解析路径，不出现在 trace、API 或控制台。**转发目标 URL 完全由客户端 URL 中的内嵌上游决定**。
+- **统一 pass-through 转发**：所有上游共用一个透传转发器
+  - 上游特有的请求头（如 Anthropic 的 `anthropic-version`）由客户端 SDK 自己设置，代理不注入
 - **Authorization 透传**：客户端的 `Authorization` / `x-api-key` / `x-goog-api-key` 原样透传给上游；AILens360 **不持有、不替换、不存储**真实上游 Key
 - **流式响应处理**：用 `httputil.ReverseProxy` + tee reader/writer 边转发边解析 SSE
 - **零 buffer 透传**：响应流式回传给客户端，不等待完整接收
@@ -215,7 +215,7 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 - **延迟**：ttfb / **ttft** / latency / gen_duration
 - **吞吐**：tps（tokens/sec）、bytes_streamed
 - **质量**：finish_reason 分布、错误率、stream_status（completed / aborted / errored / stalled）
-- **业务**：按 project / provider / model / user / session / tag 多维度聚合
+- **业务**：按 project / model / user / session / tag 多维度聚合
 
 **实时指标**：Redis 维护 QPS、最近 1/5/15 分钟的 ttft、错误率、tokens/秒、各 Project 计数；Web Console 长窗口查询直接读预聚合（v0.4+ 落地 `metrics_*` 物化表，避免扫主表）。
 
@@ -232,10 +232,10 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 - `POST /api/auth/login` —— 用户名/密码换取 JWT
 - `GET  /api/auth/me` —— 当前登录态
 - `POST/GET/PUT/DELETE /api/projects[/{id}]` —— Project CRUD
-- `GET  /api/traces` —— Span 列表（支持 `project_id` / `trace_id` / `user_id` / `session_id` / `provider` / `model` / `status` / 时间范围过滤）
+- `GET  /api/traces` —— Span 列表（支持 `project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / 时间范围过滤）
 - `GET  /api/traces/{id}` —— Span 详情
 - `GET  /api/trace_groups` —— Langfuse 风格逻辑 trace 聚合（按 `trace_id` 收敛）
-- `GET  /api/metrics/usage` —— 用量聚合（维度：provider / model / project / day / hour）
+- `GET  /api/metrics/usage` —— 用量聚合（维度：model / project / day / hour）
 - `GET  /healthz` / `GET /version`
 
 **规划中、尚未挂载**：`POST /api/traces/{id}/replay`、`WS /api/stream`、OTLP receiver。
@@ -269,8 +269,8 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
       (Go net/http 保留原始 "//"，因此 scheme 不会丢失)
 3. 读取 X-AILens-Project-Key 头，查三层缓存 (LRU → Redis → Postgres)
    → 拿到 project_id；缺失头返回 401，未命中返回 404
-4. DetectFromHost("api.openai.com") → provider tag = "openai"
-   （仅用于挑解析器与打 trace 标签，不影响转发目标）
+4. 按 upstream.Host 在 stream 包内部选解析器（api.openai.com → OpenAI 解析器）
+   不影响转发目标，trace 也不带厂商标签
 5. 改写请求：
    - URL: 直接使用 upstream_url（scheme + host + path + query 原样）
    - Authorization: 原样透传，不替换
@@ -280,7 +280,7 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 8. 上游返回响应（可能是 SSE 流）
 9. Proxy 用 streamTeeWriter 同时：
    a. 把数据写回客户端（保证低延迟）
-   b. 边转发边送入对应 provider 的 Parser，并有上限地保留 raw 片段
+   b. 边转发边送入对应的 SSE Parser，并有上限地保留 raw 片段
 10. 客户端收到完整响应
 11. 异步：Parser 解析 buffer → Collector 计算指标
     → 存储前 REDACT 敏感 Header（含 X-AILens-Project-Key）→ Postgres 按 project_id 落库
@@ -303,7 +303,7 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 
 ### 4.1 核心边界
 
-AILens360 位于用户应用和上游 LLM Provider 之间，会接触客户端透传的 Authorization、prompt、completion 和调用元数据。默认安全目标：
+AILens360 位于用户应用和上游 LLM 服务之间，会接触客户端透传的 Authorization、prompt、completion 和调用元数据。默认安全目标：
 
 1. **不持有、不存储真实上游 API Key**：客户端的 `Authorization` / `x-api-key` / `x-goog-api-key` 仅在内存中透传给上游，**不写入数据库**、**不进入日志**、**不出现在控制台 API 响应**。
 2. Project 的 `project_key` 是入口凭据（视同密钥），默认 64 位 base62（约 381 bits 熵），密码学上不可被穷举枚举；生产环境必须强制 HTTPS 防止 header 在传输层泄露。客户端透传的上游 API Key 是上游侧的安全边界，不在 AILens360 持有范围内。
@@ -399,7 +399,6 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 
 | 列 | 类型 | 含义 |
 |---|---|---|
-| `provider` | TEXT | `DetectFromHost(upstream.Host)` 推断：`openai` / `anthropic` / `gemini` |
 | `model` | TEXT | 请求 body 中识别出的 `model` 字段 |
 | `is_stream` | BOOLEAN | 是否流式 |
 | `request_path` | TEXT | 上游**绝对** URL（含 scheme + host + path + query） |
@@ -427,16 +426,18 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 
 #### Token 与成本
 
+四个输入相关计数列互不重叠（disjoint），每列按各自费率计费，求和即"总输入计费单位"。Parser 层会把 OpenAI / Gemini 上游回传的 `prompt_tokens`（含 cached）减去 cached 后再写入 `input_tokens`，与 Anthropic 原生语义对齐。
+
 | 列 | 类型 | 含义 |
 |---|---|---|
-| `input_tokens` | INTEGER | 输入 token |
+| `input_tokens` | INTEGER | **未命中**缓存的输入 token，按 input 费率计费 |
+| `cached_input_tokens` | INTEGER | 命中缓存的输入 token，按 cache_read 费率计费（缺失时退回 input 费率） |
+| `cache_creation_input_tokens` | INTEGER | cache-write token，按 cache_write 费率计费（目前仅 Anthropic 上报） |
 | `output_tokens` | INTEGER | 输出 token |
-| `total_tokens` | INTEGER | 总计 |
+| `total_tokens` | INTEGER | 上游回传的 `total_tokens`；缺失时由 parser 按 `input + cached + cache_creation + output` 求和 |
 | `reasoning_tokens` | INTEGER | thinking / reasoning token（OpenAI o-series、Gemini thoughts） |
-| `cached_input_tokens` | INTEGER | 命中缓存的输入 token（折扣计费） |
-| `cache_creation_input_tokens` | INTEGER | Anthropic 专属：cache-write 计费 token |
 | `tokens_estimated` | BOOLEAN | true = 由本地 tokenizer 估算（上游未给 usage） |
-| `cost_usd` | DOUBLE PRECISION | 按 `internal/pricing` 价格表计算的成本 |
+| `cost_usd` | DOUBLE PRECISION | `input·r_in + cached·r_cr + cache_creation·r_cw + output·r_out`，超 tier 阈值时整组费率切到 tier |
 
 #### 延迟与吞吐
 
@@ -456,7 +457,6 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 | 索引 | 列 | 用途 |
 |---|---|---|
 | `idx_traces_project_created` | `(project_id, created_at DESC)` | Project 维度列表 |
-| `idx_traces_provider` | `(provider, created_at DESC)` | provider 过滤 |
 | `idx_traces_model` | `(model, created_at DESC)` | 模型过滤 |
 | `idx_traces_status` | `(status)` | 错误率聚合 |
 | `idx_traces_user_created` | `(user_id, created_at DESC)` | 按业务用户下钻 |

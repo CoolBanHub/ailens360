@@ -18,9 +18,9 @@ func TestCostBreakdownAppliesCacheRates(t *testing.T) {
 	c.Replace(map[string]PricePerMTok{
 		"claude-test": {Input: 3.0, Output: 15.0, CacheRead: 0.3, CacheWrite: 3.75},
 	})
-	// 1M total input: 800k cached + 200k uncached, 50k cache_creation, 1M output.
+	// Disjoint inputs: 200k uncached + 800k cache_read + 50k cache_creation, 1M output.
 	got := c.Cost("claude-test", TokenUsage{
-		Input: 1_000_000, CachedInput: 800_000, CacheCreation: 50_000, Output: 1_000_000,
+		Input: 200_000, CachedInput: 800_000, CacheCreation: 50_000, Output: 1_000_000,
 	})
 	want := 200_000.0/1e6*3.0 + 800_000.0/1e6*0.3 + 50_000.0/1e6*3.75 + 1_000_000.0/1e6*15.0
 	eq(t, "claude-test", got, want)
@@ -31,8 +31,10 @@ func TestCostFallsBackToInputWhenCacheRateMissing(t *testing.T) {
 	c.Replace(map[string]PricePerMTok{
 		"openai-test": {Input: 2.5, Output: 10.0}, // no cache_read/cache_write
 	})
-	// Cache hit should bill at full input rate when CacheRead is absent.
-	got := c.Cost("openai-test", TokenUsage{Input: 1000, CachedInput: 400, Output: 100})
+	// 600 uncached + 400 cache_read, 100 output. With no cache_read rate
+	// configured, the cached portion bills at the full input rate — so the
+	// total input charge equals the full 1000-token prompt at input rate.
+	got := c.Cost("openai-test", TokenUsage{Input: 600, CachedInput: 400, Output: 100})
 	want := 1000.0/1e6*2.5 + 100.0/1e6*10.0
 	eq(t, "openai-test", got, want)
 }
@@ -119,10 +121,12 @@ func TestTieredPricingTierMissingCacheKeepsBaseRate(t *testing.T) {
 			}},
 		},
 	})
+	// 200k uncached + 100k cache_read, total 300k context crosses the tier
+	// threshold (272k). Uncached bills at the tier input rate; cached bills
+	// at the base cache_read rate (the tier omitted it); output at tier.
 	got := c.Cost("gpt5-test", TokenUsage{
-		Input: 300_000, CachedInput: 100_000, Output: 1000, ContextTokens: 300_000,
+		Input: 200_000, CachedInput: 100_000, Output: 1000, ContextTokens: 300_000,
 	})
-	// uncached @ tier-input + cached @ base cache_read + output @ tier
 	want := 200_000.0/1e6*5 + 100_000.0/1e6*0.25 + 1000.0/1e6*22.5
 	eq(t, "tier preserves base cache_read", got, want)
 }

@@ -39,7 +39,6 @@ export interface Trace {
   UserID: string;
   SessionID: string;
   Tags: string;
-  Provider: string;
   Model: string;
   IsStream: boolean;
   Status: string;

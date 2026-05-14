@@ -187,7 +187,6 @@ func (h *Handlers) ListTraces(w http.ResponseWriter, r *http.Request) {
 		TraceID:     q.Get("trace_id"),
 		UserID:      q.Get("user_id"),
 		SessionID:   q.Get("session_id"),
-		Provider:    q.Get("provider"),
 		Model:       q.Get("model"),
 		Status:      q.Get("status"),
 		StartUnixMs: atoi64(q.Get("start_time")),
@@ -230,7 +229,6 @@ func (h *Handlers) ListTraceGroups(w http.ResponseWriter, r *http.Request) {
 		SessionID:   q.Get("session_id"),
 		TraceName:   q.Get("trace_name"),
 		Status:      q.Get("status"),
-		Provider:    q.Get("provider"),
 		Model:       q.Get("model"),
 		StartUnixMs: atoi64(q.Get("start_time")),
 		EndUnixMs:   atoi64(q.Get("end_time")),
@@ -248,23 +246,22 @@ func (h *Handlers) ListTraceGroups(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Facets returns the distinct provider + model values seen for a project,
-// used to populate filter dropdowns in the UI. Both lists are ordered by
-// frequency (desc) and capped at 200 entries.
+// Facets returns the distinct model values seen for a project, used to
+// populate the trace-filter model dropdown. Ordered by frequency (desc) and
+// capped at 200 entries.
 func (h *Handlers) Facets(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" {
 		response.Error(w, http.StatusBadRequest, 40000, "project_id required")
 		return
 	}
-	providers, models, err := h.Traces.Facets(r.Context(), projectID)
+	models, err := h.Traces.Facets(r.Context(), projectID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, 50001, err.Error())
 		return
 	}
 	response.OK(w, map[string]any{
-		"providers": providers,
-		"models":    models,
+		"models": models,
 	})
 }
 
