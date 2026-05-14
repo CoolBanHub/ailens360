@@ -189,9 +189,15 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 	reqHdr, _ := json.Marshal(ev.RequestHeaders)
 	respHdr, _ := json.Marshal(ev.ResponseHeaders)
 
-	respBody := ev.ResponseText
+	// Prefer the raw captured body — for streams that's the original SSE
+	// frames (the UI's pretty view reassembles them; the raw view shows them
+	// verbatim), for non-stream it's the upstream JSON. Fall back to the
+	// parser-joined ResponseText only when no raw bytes were captured
+	// (unrecognized provider, etc). Token estimation later still uses
+	// ResponseText, which stays as plain text.
+	respBody := string(ev.ResponseBody)
 	if respBody == "" {
-		respBody = string(ev.ResponseBody)
+		respBody = ev.ResponseText
 	}
 
 	logicTraceID := ev.LogicTraceID
