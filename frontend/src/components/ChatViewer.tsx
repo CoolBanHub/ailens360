@@ -169,6 +169,7 @@ interface OpenAIToolDelta {
 
 interface OpenAIChunk {
   choices?: Array<{
+    index?: number;
     delta?: {
       role?: string;
       content?: string;
@@ -178,16 +179,40 @@ interface OpenAIChunk {
   }>;
 }
 
-// assembleOpenAIStream concatenates `delta.content` and folds `tool_calls`
-// deltas (keyed by `index`, with progressively-streamed `function.arguments`)
-// back into a single assistant Message — same shape as a non-stream response,
-// so the existing MessageBubble can render it without special-casing streams.
+interface ToolCallBuilder {
+  id?: string;
+  type?: string;
+  name?: string;
+  args: string;
+}
+
+interface ChoiceBuilder {
+  role: string;
+  content: string;
+  toolBuilders: Map<number, ToolCallBuilder>;
+  toolOrder: number[];
+}
+
+// assembleOpenAIStream folds OpenAI-style SSE frames back into one Message
+// per `choices[*].index`. When the request used n>1, each index carries an
+// independent completion (possibly with its own tool_calls); merging them
+// into a single message would mix two different model outputs together.
+// Within a single choice, `tool_calls[*].index` accumulates pieces of one
+// tool call (`function.arguments` is streamed character-by-character).
 function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   if (!raw) return [];
-  let role: string = 'assistant';
-  let content = '';
-  const toolBuilders = new Map<number, { id?: string; type?: string; name?: string; args: string }>();
-  const toolOrder: number[] = [];
+  const choices = new Map<number, ChoiceBuilder>();
+  const choiceOrder: number[] = [];
+
+  const choiceFor = (idx: number): ChoiceBuilder => {
+    let cb = choices.get(idx);
+    if (!cb) {
+      cb = { role: 'assistant', content: '', toolBuilders: new Map(), toolOrder: [] };
+      choices.set(idx, cb);
+      choiceOrder.push(idx);
+    }
+    return cb;
+  };
 
   for (const line of raw.split('\n')) {
     if (!line.startsWith('data:')) continue;
@@ -199,36 +224,45 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
     for (const choice of chunk.choices) {
       const delta = choice.delta;
       if (!delta) continue;
-      if (delta.role) role = delta.role;
-      if (typeof delta.content === 'string') content += delta.content;
+      const cb = choiceFor(choice.index ?? 0);
+      if (delta.role) cb.role = delta.role;
+      if (typeof delta.content === 'string') cb.content += delta.content;
       if (Array.isArray(delta.tool_calls)) {
         for (const tcd of delta.tool_calls) {
-          const idx = tcd.index ?? 0;
-          let b = toolBuilders.get(idx);
-          if (!b) { b = { args: '' }; toolBuilders.set(idx, b); toolOrder.push(idx); }
-          if (tcd.id) b.id = tcd.id;
-          if (tcd.type) b.type = tcd.type;
-          if (tcd.function?.name) b.name = tcd.function.name;
-          if (tcd.function?.arguments) b.args += tcd.function.arguments;
+          const tIdx = tcd.index ?? 0;
+          let tb = cb.toolBuilders.get(tIdx);
+          if (!tb) { tb = { args: '' }; cb.toolBuilders.set(tIdx, tb); cb.toolOrder.push(tIdx); }
+          if (tcd.id) tb.id = tcd.id;
+          if (tcd.type) tb.type = tcd.type;
+          if (tcd.function?.name) tb.name = tcd.function.name;
+          if (tcd.function?.arguments) tb.args += tcd.function.arguments;
         }
       }
     }
   }
 
-  if (!content && toolOrder.length === 0) return [];
+  // Render in choice-index order (0,1,2,...) — same shape as the non-stream
+  // response which already emits one Message per choice.
+  choiceOrder.sort((a, b) => a - b);
 
-  const msg: Message = { role: role as Role, content };
-  if (toolOrder.length > 0) {
-    msg.tool_calls = toolOrder.map((idx) => {
-      const b = toolBuilders.get(idx)!;
-      return {
-        id: b.id,
-        type: b.type || 'function',
-        function: { name: b.name || '', arguments: b.args },
-      };
-    });
+  const out: Message[] = [];
+  for (const idx of choiceOrder) {
+    const cb = choices.get(idx)!;
+    if (!cb.content && cb.toolOrder.length === 0) continue;
+    const msg: Message = { role: cb.role as Role, content: cb.content };
+    if (cb.toolOrder.length > 0) {
+      msg.tool_calls = cb.toolOrder.map((tIdx) => {
+        const tb = cb.toolBuilders.get(tIdx)!;
+        return {
+          id: tb.id,
+          type: tb.type || 'function',
+          function: { name: tb.name || '', arguments: tb.args },
+        };
+      });
+    }
+    out.push(msg);
   }
-  return [msg];
+  return out;
 }
 
 /**
