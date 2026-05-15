@@ -85,7 +85,7 @@ export default function ProjectSettings() {
           {t('settings.key.hint')}
         </p>
         <div className="mb-4">
-          <SecretField label="project_key" value={p.project_key} />
+          <SecretField label={t('settings.key.label')} value={p.project_key} />
         </div>
         {!confirmReset ? (
           <button

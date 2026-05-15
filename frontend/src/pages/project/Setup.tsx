@@ -52,7 +52,7 @@ export default function ProjectSetup() {
           STEP 1
         </div>
         <h2 className="text-xl font-bold tracking-tight">
-          {t('setup.step1.title')} <span className="grad-text">project_key</span>
+          {t('setup.step1.title')}
         </h2>
         <p className="text-sm text-ink-3 mt-1 mb-5">
           {t('setup.step1.hint')}
