@@ -2,11 +2,16 @@
 // table. The collector process embeds a Maintainer that:
 //   - on startup, ensures the current month plus N future months exist
 //   - on a periodic tick (default 24h), repeats the same ensure check
-//   - optionally detaches partitions older than the retention window
+//   - when RetentionMonths > 0, hard-deletes data older than the retention
+//     window: DROPs the matching `traces_YYYYMM` partitions and removes the
+//     corresponding MinIO objects under "{project_id}/{YYYYMM}/" for every
+//     known project.
 //
 // Partitions are RANGE'd on `created_at` (BIGINT ms since epoch). Children are
 // named `traces_YYYYMM` so they're trivially sortable and self-documenting.
-// We DETACH, never DROP — operators can archive the detached table separately.
+// MinIO keys follow "{project_id}/{YYYYMM}/{trace_id}/{request|response}.{ext}"
+// — the YYYYMM segment is aligned with the partition cadence so the two stores
+// can be purged in lockstep.
 package partition
 
 import (
@@ -19,6 +24,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/CoolBanHub/ailens360/internal/storage/repo"
 )
 
 type Config struct {
@@ -27,17 +34,29 @@ type Config struct {
 	CheckInterval   time.Duration
 }
 
+// BodyPurger is the narrow slice of bodystore.Store the maintainer needs.
+// Kept as a local interface so tests can stub it without depending on the
+// real S3 client.
+type BodyPurger interface {
+	DeletePrefix(ctx context.Context, prefix string) error
+}
+
 type Maintainer struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
-	cfg    Config
+	pool      *pgxpool.Pool
+	logger    *slog.Logger
+	cfg       Config
+	projects  repo.ProjectRepo // optional — when nil, MinIO cleanup is skipped
+	bodyStore BodyPurger       // optional — when nil, MinIO cleanup is skipped
 
 	startOnce sync.Once
 	cancel    context.CancelFunc
 	done      chan struct{}
 }
 
-func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger) *Maintainer {
+// New builds a Maintainer. Pass projects + bodyStore to enable MinIO cleanup
+// for dropped months; pass nil for either to keep the maintainer Postgres-only
+// (useful in tests / migration scenarios).
+func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger, projects repo.ProjectRepo, bodyStore BodyPurger) *Maintainer {
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = 24 * time.Hour
 	}
@@ -45,10 +64,12 @@ func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger) *Maintainer {
 		cfg.PreCreate = 0
 	}
 	return &Maintainer{
-		pool:   pool,
-		logger: logger,
-		cfg:    cfg,
-		done:   make(chan struct{}),
+		pool:      pool,
+		logger:    logger,
+		cfg:       cfg,
+		projects:  projects,
+		bodyStore: bodyStore,
+		done:      make(chan struct{}),
 	}
 }
 
@@ -79,8 +100,8 @@ func (m *Maintainer) Stop() {
 }
 
 // Ensure creates the partitions required to safely INSERT for the current
-// month and the next PreCreate months, and detaches any partitions whose end
-// boundary is older than RetentionMonths (if > 0).
+// month and the next PreCreate months, and hard-deletes any data whose start
+// month is older than RetentionMonths (if > 0).
 func (m *Maintainer) Ensure(ctx context.Context) error {
 	now := time.Now().UTC()
 	for i := 0; i <= m.cfg.PreCreate; i++ {
@@ -90,9 +111,14 @@ func (m *Maintainer) Ensure(ctx context.Context) error {
 	}
 	if m.cfg.RetentionMonths > 0 {
 		threshold := monthStart(addMonths(now, -m.cfg.RetentionMonths))
-		if err := m.detachOlderThan(ctx, threshold); err != nil {
-			// Detach failures aren't fatal — log and continue.
-			m.logger.Warn("partition: detach older", "err", err)
+		dropped, err := m.dropOlderThan(ctx, threshold)
+		if err != nil {
+			// Drop failures aren't fatal — log and continue so MinIO cleanup
+			// still has a chance to run for any partitions we did drop.
+			m.logger.Warn("partition: drop older", "err", err)
+		}
+		if err := m.purgeBodiesForMonths(ctx, dropped); err != nil {
+			m.logger.Warn("partition: purge bodies", "err", err)
 		}
 	}
 	return nil
@@ -114,7 +140,10 @@ func (m *Maintainer) createMonth(ctx context.Context, ref time.Time) error {
 	return nil
 }
 
-func (m *Maintainer) detachOlderThan(ctx context.Context, threshold time.Time) error {
+// dropOlderThan DROPs every traces_YYYYMM partition whose start month is
+// strictly older than threshold. Returns the months that were dropped so the
+// caller can purge the matching MinIO prefixes.
+func (m *Maintainer) dropOlderThan(ctx context.Context, threshold time.Time) ([]time.Time, error) {
 	rows, err := m.pool.Query(ctx, `
 		SELECT child.relname
 		FROM pg_inherits i
@@ -123,7 +152,7 @@ func (m *Maintainer) detachOlderThan(ctx context.Context, threshold time.Time) e
 		WHERE parent.relname = 'traces'
 	`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -131,32 +160,64 @@ func (m *Maintainer) detachOlderThan(ctx context.Context, threshold time.Time) e
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
-			return err
+			return nil, err
 		}
 		names = append(names, n)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
+
+	var dropped []time.Time
 	for _, name := range names {
 		ts, ok := parsePartitionMonth(name)
 		if !ok {
 			continue
 		}
-		// Detach when the partition's start month is strictly older than
-		// the retention threshold (e.g. retention=3 and now=June means we keep
-		// April/May/June and detach March or earlier).
+		// Drop when the partition's start month is strictly older than the
+		// retention threshold (e.g. retention=3 and now=June means we keep
+		// April/May/June and drop March or earlier).
 		if !ts.Before(threshold) {
 			continue
 		}
 		if _, err := m.pool.Exec(ctx,
-			fmt.Sprintf(`ALTER TABLE traces DETACH PARTITION %s`, name)); err != nil {
-			m.logger.Warn("partition: detach", "name", name, "err", err)
+			fmt.Sprintf(`DROP TABLE IF EXISTS %s`, name)); err != nil {
+			m.logger.Warn("partition: drop", "name", name, "err", err)
 			continue
 		}
-		m.logger.Info("partition detached", "name", name, "month_start", ts.Format("2006-01"))
+		dropped = append(dropped, ts)
+		m.logger.Info("partition dropped", "name", name, "month_start", ts.Format("2006-01"))
 	}
-	return nil
+	return dropped, nil
+}
+
+// purgeBodiesForMonths removes MinIO objects under "{project_id}/{YYYYMM}/"
+// for every known project and every month in `months`. The maintainer only
+// runs this when projects + bodyStore are wired in — otherwise it's a no-op
+// so PG-only deployments keep working.
+func (m *Maintainer) purgeBodiesForMonths(ctx context.Context, months []time.Time) error {
+	if len(months) == 0 || m.projects == nil || m.bodyStore == nil {
+		return nil
+	}
+	projects, err := m.projects.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list projects: %w", err)
+	}
+	var firstErr error
+	for _, p := range projects {
+		for _, mo := range months {
+			prefix := fmt.Sprintf("%s/%s/", p.ID, mo.Format("200601"))
+			if err := m.bodyStore.DeletePrefix(ctx, prefix); err != nil {
+				m.logger.Warn("partition: delete bodies", "prefix", prefix, "err", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			m.logger.Info("bodies purged", "prefix", prefix)
+		}
+	}
+	return firstErr
 }
 
 func (m *Maintainer) run(ctx context.Context) {

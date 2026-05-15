@@ -192,8 +192,10 @@ type PartitionConfig struct {
 	// PreCreate is the number of future months to ensure exist (in addition to
 	// the current month). 1 means "create next month".
 	PreCreate int `yaml:"pre_create"`
-	// RetentionMonths > 0 detaches partitions older than N months. 0 keeps all.
-	// Detach (not drop) — operators can archive the detached table separately.
+	// RetentionMonths > 0 hard-deletes data older than N months: DROPs the
+	// matching `traces_YYYYMM` partitions and removes every MinIO object whose
+	// key starts with "{project_id}/{YYYYMM}/" for those months. Default is 3.
+	// Set a negative value (e.g. -1) to disable purging and keep all history.
 	RetentionMonths int `yaml:"retention_months"`
 	// CheckInterval is how often the maintainer wakes up to ensure partitions.
 	CheckInterval time.Duration `yaml:"check_interval"`
@@ -304,6 +306,9 @@ func (c *Config) Defaults() {
 	}
 	if c.Partition.PreCreate == 0 {
 		c.Partition.PreCreate = 1
+	}
+	if c.Partition.RetentionMonths == 0 {
+		c.Partition.RetentionMonths = 3
 	}
 	if c.Partition.CheckInterval == 0 {
 		c.Partition.CheckInterval = 24 * time.Hour

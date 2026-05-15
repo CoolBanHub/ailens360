@@ -55,7 +55,17 @@ func BuildCollector(ctx context.Context, cfg *config.Config) (*CollectorApp, err
 	}
 
 	traceRepo := postgres.NewTraceRepo(pool)
+	projectRepo := postgres.NewProjectRepo(pool)
 	realtime := metrics.New(rdb, cfg.Metrics.WindowSecs, cfg.Metrics.RetentionSecs, log)
+
+	// BodyStore is wired into the partition maintainer so it can purge MinIO
+	// objects in lockstep with dropping old `traces_YYYYMM` partitions.
+	bodyStore, err := newBodyStore(cfg)
+	if err != nil {
+		_ = rdb.Close()
+		pool.Close()
+		return nil, fmt.Errorf("body store: %w", err)
+	}
 
 	priceCatalog := pricing.NewCatalog()
 	// Collector reads pricing from the Redis warm cache populated by the api
@@ -77,7 +87,7 @@ func BuildCollector(ctx context.Context, cfg *config.Config) (*CollectorApp, err
 		PreCreate:       cfg.Partition.PreCreate,
 		RetentionMonths: cfg.Partition.RetentionMonths,
 		CheckInterval:   cfg.Partition.CheckInterval,
-	}, log)
+	}, log, projectRepo, bodyStore)
 	if err := partMaint.Start(ctx); err != nil {
 		_ = rdb.Close()
 		pool.Close()

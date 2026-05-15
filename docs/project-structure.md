@@ -13,7 +13,7 @@
 | **D3** | 进程间 IPC | Redis Stream + consumer group | 已有 Redis；最小新依赖；XAUTOCLAIM 天然防 stuck |
 | **D4** | 路由库 | `go-chi/chi/v5` | 轻量、stdlib 兼容、中间件机制清晰、社区主流 |
 | **D5** | DB 访问层 | **手写 SQL + `pgxpool`**，不引入 sqlc / ORM | 表结构稳定、查询不复杂；ORM 的好处覆盖不了它的隐式行为 |
-| **D6** | trace 表存储 | Postgres RANGE 分区（按 created_at 月度）+ Go 维护作业 | 自动建分区、可选自动 DETACH 旧分区；零 PG 扩展依赖 |
+| **D6** | trace 表存储 | Postgres RANGE 分区（按 created_at 月度）+ Go 维护作业 | 自动建分区、按 `RETENTION_MONTHS` 硬删超龄分区与对应 MinIO 对象；零 PG 扩展依赖 |
 | **D7** | 大 body 存储 | S3 兼容对象存储（minio-go v7），PG 只存 object key | 主表瘦身、流式 multipart 上传支持大响应；fail-open 不影响代理 |
 | **D8** | 依赖注入 | **手写构造函数**，不用 wire/fx | 项目规模不需要；显式即文档；IDE 跳转友好；测试最易写 |
 | **D9** | 仓储模式 | 接口与实现分离 | 业务代码只依赖 `internal/storage/repo/` 接口，可平滑切换 Postgres → ClickHouse |
@@ -178,7 +178,7 @@ ailens360/
 
 ### 2.6 trace 表自动分区
 
-`traces` 表在 `0001_init.up.sql` 声明为 `PARTITION BY RANGE (created_at)`。collector 进程启动时跑 `internal/partition.Maintainer.Ensure(ctx)` 同步建当前月 + N 个未来月的分区，并在后台 goroutine 每 24h 重复执行。可选 `AILENS360_PARTITION_RETENTION_MONTHS > 0` 自动 DETACH 老分区（不 DROP；归档由运维决定）。
+`traces` 表在 `0001_init.up.sql` 声明为 `PARTITION BY RANGE (created_at)`。collector 进程启动时跑 `internal/partition.Maintainer.Ensure(ctx)` 同步建当前月 + N 个未来月的分区，并在后台 goroutine 每 24h 重复执行。`AILENS360_PARTITION_RETENTION_MONTHS`（默认 3）控制超龄分区的硬删除：维护作业 DROP 对应 `traces_YYYYMM` 分区，并按 `{project_id}/{YYYYMM}/` 前缀清理 MinIO 对象，两者保持月度对齐。设为负数（如 `-1`）可关闭清理。
 
 零 Postgres 扩展依赖，零外部 cron 依赖。
 

@@ -311,7 +311,7 @@ server {
 
 - `terminationGracePeriodSeconds` 至少 90s，让 proxy 长 SSE 连接优雅收尾
 - collector 副本可以多开；XAUTOCLAIM 会把死掉副本的消息自动转移给活的
-- 把 collector 的 `AILENS360_PARTITION_RETENTION_MONTHS` 设个值，自动归档老数据
+- collector 默认保留 3 个月 trace（`AILENS360_PARTITION_RETENTION_MONTHS=3`），到期自动 DROP 老分区并清掉 MinIO 上的对应对象；可调大或设负数关闭
 
 ---
 
@@ -334,7 +334,7 @@ server {
 | `AILENS360_PUBLIC_URL` | 空 | 共享公网 origin（控制台用） |
 | `AILENS360_PROXY_PUBLIC_URL` | 空（回退 PUBLIC_URL） | proxy 专属覆盖 |
 | `AILENS360_PARTITION_PRE_CREATE` | `1` | 提前建 N 个未来月分区 |
-| `AILENS360_PARTITION_RETENTION_MONTHS` | `0` | >0 自动 DETACH 超龄分区（不 DROP） |
+| `AILENS360_PARTITION_RETENTION_MONTHS` | `3` | >0 硬删超龄分区（DROP）并清理对应 MinIO 对象；负值关闭 |
 
 ---
 
@@ -361,12 +361,13 @@ mc mirror minio/ailens360-traces /backup/ailens360-bodies/
 
 ### 7.1 控制 PG 体积
 
-- `traces` 已按月分区。把 `AILENS360_PARTITION_RETENTION_MONTHS=12` 之后超过 12 个月的分区会自动 DETACH（保留实体表，运维可决定 DROP 或归档到对象存储）。
+- `traces` 已按月分区。默认 `AILENS360_PARTITION_RETENTION_MONTHS=3`，collector 维护作业每 24h 检查一次，DROP 早于该窗口的 `traces_YYYYMM` 分区；想保留更久就调大（如 `12`），想完全关闭就设 `-1`。
 - 大 body 在 MinIO，PG 主表瘦身。
 
 ### 7.2 控制 MinIO 体积
 
-- 每个 object 的 key 都是 `{project}/{YYYYMM}/{trace}/...`，可直接配 MinIO Lifecycle policy 按月清理。
+- 由 collector 维护作业按月与 PG 分区同步清理：DROP `traces_YYYYMM` 时会删除每个项目下的 `{project_id}/{YYYYMM}/` 前缀对象，无需额外配 Lifecycle policy。
+- 若要保留 PG 中的 trace 元数据但提早清理 MinIO，可在 bucket 级再叠一层 MinIO Lifecycle（key 已按 `{project}/{YYYYMM}/{trace}/...` 分桶）。
 - 若 `AILENS360_BODY_STORE_GZIP_BODIES=true`（默认开），对象本身已 gzip。
 
 ---
