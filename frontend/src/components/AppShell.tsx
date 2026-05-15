@@ -158,7 +158,8 @@ function Sidebar({ projectId, inProject, collapsed, onToggle }: SidebarProps) {
         {/* Brand row + collapse toggle */}
         <div className={'flex items-center pt-3 pb-3 ' + (collapsed ? 'px-2 justify-center' : 'px-4 justify-between')}>
           <Link
-            to="/projects"
+            to="/"
+            title={t('landing.nav.home')}
             className="flex items-center gap-2.5 hover:opacity-90 transition min-w-0"
           >
             <div className="relative w-8 h-8 rounded-xl overflow-hidden grid place-items-center shrink-0

@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 // Tiny auth store. Token + username live in localStorage; subscribers are
 // notified via a window 'storage'-style event so the AppShell can react to
 // logout from any tab.
@@ -36,4 +38,10 @@ export function subscribe(fn: () => void) {
     window.removeEventListener(EVENT, fn);
     window.removeEventListener('storage', fn);
   };
+}
+
+export function useAuthed() {
+  const [authed, setAuthed] = useState(!!getAuth().token);
+  useEffect(() => subscribe(() => setAuthed(!!getAuth().token)), []);
+  return authed;
 }

@@ -1,22 +1,16 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import AppShell from './components/AppShell';
-import Login from './pages/Login';
+import Landing from './pages/Landing';
 import ProjectsHome from './pages/ProjectsHome';
 import ProjectOverview from './pages/project/Overview';
 import ProjectTraces from './pages/project/Traces';
 import ProjectTraceDetail from './pages/project/TraceDetail';
 import ProjectSetup from './pages/project/Setup';
 import ProjectSettings from './pages/project/Settings';
-import { getAuth, subscribe } from './lib/auth';
+import { useAuthed } from './lib/auth';
 import { useT } from './i18n';
 import type { LocaleKey } from './i18n/locales';
-
-function useAuthed() {
-  const [authed, setAuthed] = useState(!!getAuth().token);
-  useEffect(() => subscribe(() => setAuthed(!!getAuth().token)), []);
-  return authed;
-}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const authed = useAuthed();
@@ -28,7 +22,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 const BRAND = 'AILens360';
 
 function moduleTitleKey(path: string): LocaleKey | null {
-  if (path === '/login') return 'login.submit';
+  if (path === '/' || path === '' || path === '/login') return null;
   if (path === '/projects' || path === '/projects/') return 'nav.allProjects';
   const m = path.match(/^\/projects\/[^/]+\/([^/]+)/);
   if (!m) return null;
@@ -58,7 +52,10 @@ export default function App() {
     <>
     <DocumentTitle />
     <Routes>
-      <Route path="/login" element={<Login />} />
+      <Route path="/" element={<Landing />} />
+      {/* /login still works as a deep link; Landing reads the path and auto-opens
+          the login modal so the user keeps the landing context behind it. */}
+      <Route path="/login" element={<Landing />} />
 
       <Route
         path="/projects"
@@ -88,8 +85,7 @@ export default function App() {
         }
       />
 
-      <Route path="/" element={<Navigate to="/projects" replace />} />
-      <Route path="*" element={<Navigate to="/projects" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
     </>
   );
