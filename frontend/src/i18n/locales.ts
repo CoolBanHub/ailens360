@@ -190,7 +190,7 @@ export const zh = {
   'settings.key.resetExpire':     '旧密钥会立即失效。',
   'settings.key.resetSuccess':    '✓ 已生成新的 project_key：',
   'settings.section.danger':      '危险区',
-  'settings.danger.hint':         '删除项目后，项目密钥立即失效（客户端将收到 401）。历史 trace 不会被删除，仍可在 DB 中查到，但 UI 里无法再回到这个项目。',
+  'settings.danger.hint':         '删除项目会一并清除该项目下的全部 trace 记录和对象存储中的请求 / 响应体，项目密钥随即失效（客户端将收到 401）。该操作不可撤销。',
   'settings.danger.delete':       '删除项目「{name}」',
   'settings.danger.deleting':     '删除中…',
   'settings.danger.confirmDelete':'我已确认，删除',
@@ -208,6 +208,8 @@ export const zh = {
 
   'setup.step2.title':       '挑一个上游端点直接拷贝拼好的 URL',
   'setup.step2.hint':        '每行就是你 SDK 里 base_url 该填的值。Authorization 头里继续放你真实的上游 API Key，AILens360 不持有也不替换。',
+  'setup.step2.gateway':     '网关地址',
+  'setup.step2.gatewayHint': '只接受裸前缀的 SDK / 工具可以单独复制网关地址，再自行拼接上游 URL。',
 
   'setup.step3.title':       '在代码里替换 baseURL + 注入项目密钥',
   'setup.step3.hint':        '下面是几种常见 SDK 的接入示例 —— 真实 API Key 不变，base_url 换掉，再把 project_key 放进 X-AILens-Project-Key 头。',
@@ -416,7 +418,7 @@ export const en: Record<keyof typeof zh, string> = {
   'settings.key.resetExpire':     'The old key is revoked immediately.',
   'settings.key.resetSuccess':    '✓ New project_key generated: ',
   'settings.section.danger':      'Danger zone',
-  'settings.danger.hint':         'Deleting a project revokes its key immediately (clients get 401). Historical traces are kept and remain queryable in the database, but you can no longer reach this project from the UI.',
+  'settings.danger.hint':         'Deleting a project also wipes every trace and the request / response bodies in object storage that belong to it, and revokes the key immediately (clients get 401). This action cannot be undone.',
   'settings.danger.delete':       'Delete project "{name}"',
   'settings.danger.deleting':     'Deleting…',
   'settings.danger.confirmDelete':'Yes, delete it',
@@ -433,6 +435,8 @@ export const en: Record<keyof typeof zh, string> = {
 
   'setup.step2.title':       'Pick an upstream endpoint and copy the ready-made URL',
   'setup.step2.hint':        'Each line is the value to plug into base_url in your SDK. Keep your real upstream API Key in the Authorization header — AILens360 never holds or replaces it.',
+  'setup.step2.gateway':     'Gateway URL',
+  'setup.step2.gatewayHint': 'For SDKs / tools that only accept a bare prefix, copy the gateway URL and prepend it to the upstream URL yourself.',
 
   'setup.step3.title':       'Swap baseURL in code + inject the project key',
   'setup.step3.hint':        'A few common SDK examples below — your real API Key stays, replace base_url, and put project_key into the X-AILens-Project-Key header.',

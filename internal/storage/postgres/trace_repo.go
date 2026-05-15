@@ -359,6 +359,17 @@ func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, e
 	return out, rows.Err()
 }
 
+func (r *TraceRepo) DeleteByProject(ctx context.Context, projectID string) (int64, error) {
+	if projectID == "" {
+		return 0, errors.New("trace_repo: DeleteByProject requires project_id")
+	}
+	tag, err := r.pool.Exec(ctx, `DELETE FROM traces WHERE project_id=$1`, projectID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []string, hasAny bool, err error) {
 	models, err = distinctNonEmpty(ctx, r.pool, "model", projectID)
 	if err != nil {

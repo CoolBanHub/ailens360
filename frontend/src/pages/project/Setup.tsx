@@ -39,6 +39,12 @@ export default function ProjectSetup() {
 
   if (!p) return <div className="skel h-40 w-full rounded-3xl" />;
 
+  const gatewayBase = (() => {
+    const sample = p.example.openai || p.example.anthropic || p.example.gemini || '';
+    const idx = sample.indexOf('/https://');
+    return idx > 0 ? sample.slice(0, idx) : sample.replace(/\/+$/, '');
+  })();
+
   return (
     <div className="flex flex-col gap-5">
       <section className="glass glass-edge p-6">
@@ -98,6 +104,21 @@ export default function ProjectSetup() {
           {t('setup.step2.hint')}
         </p>
         <div className="flex flex-col gap-2.5">
+          <div className="flex items-center gap-3">
+            <span className="shrink-0 inline-flex items-center justify-center w-[96px]
+                             rounded-full text-[11px] font-semibold text-white py-1
+                             bg-gradient-to-r from-slate-500 to-slate-700
+                             shadow-[0_2px_6px_-2px_rgba(15,23,42,0.2)]">
+              {t('setup.step2.gateway')}
+            </span>
+            <div className="flex-1 min-w-0 code-line truncate">{gatewayBase}</div>
+            <button
+              onClick={() => copy('__gateway__', gatewayBase)}
+              className="btn-ghost shrink-0 !text-[12px] !py-1.5 !px-3"
+            >
+              {copied === '__gateway__' ? '✓' : t('common.copy')}
+            </button>
+          </div>
           {presets.map(({ label, key, grad }) => (
             <div key={label} className="flex items-center gap-3">
               <span className={`shrink-0 inline-flex items-center justify-center w-[96px]

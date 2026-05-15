@@ -203,6 +203,8 @@ make docker-down
 
 **两个域名（或同域名 + 路径分流）**：proxy 与 api 分别监听不同端口，反代前应当区别对待。SSE 必须关闭 buffering、放宽超时。
 
+> 更完整的 nginx 反代教程见 [`nginx.md`](./nginx.md)，包含同域名 path 分流、双域名、`merge_slashes off` 坑、SSL 申请、MinIO 反代、故障排查。
+
 ### 4.1 Nginx — 双域名
 
 ```nginx

@@ -93,7 +93,8 @@ func (noopStore) Get(context.Context, string) (io.ReadCloser, bodystore.ObjectMe
 func (noopStore) PresignGet(context.Context, string) (string, error) {
 	return "", errors.New("noop")
 }
-func (noopStore) EnsureBucket(context.Context) error { return nil }
+func (noopStore) EnsureBucket(context.Context) error         { return nil }
+func (noopStore) DeletePrefix(context.Context, string) error { return nil }
 
 type discardUploader struct{}
 

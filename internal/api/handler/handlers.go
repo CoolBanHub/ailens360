@@ -106,6 +106,11 @@ func (h *Handlers) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, h.projectView(p, r))
 }
 
+// DeleteProject hard-deletes a project and every trace / body object owned by
+// it. Step order matters: traces and bodies are wiped first (idempotent on
+// retry), then the project row goes, then the resolver cache is invalidated so
+// the project_key starts returning 401. If trace or body cleanup fails, the
+// project row stays put — the caller can retry the same request.
 func (h *Handlers) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	p, err := h.Projects.Get(r.Context(), id)
@@ -116,6 +121,16 @@ func (h *Handlers) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		}
 		response.Error(w, http.StatusInternalServerError, 50001, err.Error())
 		return
+	}
+	if _, err := h.Traces.DeleteByProject(r.Context(), id); err != nil {
+		response.Error(w, http.StatusInternalServerError, 50001, "delete traces: "+err.Error())
+		return
+	}
+	if h.BodyStore != nil {
+		if err := h.BodyStore.DeletePrefix(r.Context(), id+"/"); err != nil {
+			response.Error(w, http.StatusInternalServerError, 50001, "delete bodies: "+err.Error())
+			return
+		}
 	}
 	if err := h.Projects.Delete(r.Context(), id); err != nil {
 		response.Error(w, http.StatusInternalServerError, 50001, err.Error())

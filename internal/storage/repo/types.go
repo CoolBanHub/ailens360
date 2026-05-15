@@ -150,4 +150,8 @@ type TraceRepo interface {
 	// project — empty-model traces still count — so the UI can pick between
 	// the onboarding "project has no data" and the "no matches" empty states.
 	Facets(ctx context.Context, projectID string) (models []string, hasAny bool, err error)
+	// DeleteByProject removes every trace row owned by projectID. Used by the
+	// project hard-delete flow; blob bodies are wiped separately via the
+	// bodystore. Returns the number of rows removed.
+	DeleteByProject(ctx context.Context, projectID string) (int64, error)
 }

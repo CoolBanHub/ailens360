@@ -49,6 +49,13 @@ type Store interface {
 	// EnsureBucket creates the bucket if it doesn't exist. Called once at process
 	// startup. Idempotent.
 	EnsureBucket(ctx context.Context) error
+
+	// DeletePrefix removes every object whose key starts with prefix. Used for
+	// hard-deleting a project: the convention puts every body under
+	// "{project_id}/...", so passing the project id wipes its blob footprint.
+	// Errors from individual object removals are aggregated; partial progress
+	// is possible.
+	DeletePrefix(ctx context.Context, prefix string) error
 }
 
 // ObjectMeta is the small subset of object headers callers need when streaming
@@ -213,6 +220,23 @@ func (s *minioStore) Get(ctx context.Context, key string) (io.ReadCloser, Object
 		ContentEncoding: info.Metadata.Get("Content-Encoding"),
 		Size:            info.Size,
 	}, nil
+}
+
+func (s *minioStore) DeletePrefix(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("bodystore: DeletePrefix requires a non-empty prefix")
+	}
+	objCh := s.cli.ListObjects(ctx, s.cfg.Bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+	var firstErr error
+	for rem := range s.cli.RemoveObjects(ctx, s.cfg.Bucket, objCh, minio.RemoveObjectsOptions{}) {
+		if rem.Err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("bodystore: remove %q: %w", rem.ObjectName, rem.Err)
+		}
+	}
+	return firstErr
 }
 
 func (s *minioStore) PresignGet(ctx context.Context, key string) (string, error) {
