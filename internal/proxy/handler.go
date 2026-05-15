@@ -157,7 +157,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	// reserved deterministically up front so the trace event can refer to it
 	// even before the upload completes.
 	reqKey := bodystore.Key(proj.ID, time.Now(), traceID, bodystore.PartRequest, "json")
-	reqUpload := h.uploadRequestAsync(r.Context(), reqKey, reqBody)
+	reqUpload := h.uploadRequestAsync(reqKey, reqBody)
 
 	// Build outbound request: point it at the embedded upstream URL.
 	outReq := r.Clone(context.WithoutCancel(r.Context()))
@@ -180,7 +180,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("upstream request failed", "err", err, "host", upstreamURL.Host)
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		reqResult := reqUpload.wait()
-		h.emitError(traceID, reqBody, reqResult, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0, r.Header)
+		h.emitError(traceID, reqResult, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0, r.Header)
 		return
 	}
 	defer resp.Body.Close()
@@ -352,7 +352,7 @@ func (u *asyncUpload) wait() uploadResult {
 // uploadRequestAsync starts an upload of the buffered request body in a
 // goroutine and returns a handle that .wait()s for the result. If the body is
 // empty, returns a nil handle (wait() will return a zero uploadResult).
-func (h *Handler) uploadRequestAsync(ctx context.Context, key string, body []byte) *asyncUpload {
+func (h *Handler) uploadRequestAsync(key string, body []byte) *asyncUpload {
 	if len(body) == 0 || h.store == nil {
 		return nil
 	}
@@ -360,7 +360,6 @@ func (h *Handler) uploadRequestAsync(ctx context.Context, key string, body []byt
 	// Detach from the inbound request's context so an early client cancel
 	// doesn't kill the upload — the bodystore enforces its own timeout.
 	uploadCtx := context.Background()
-	_ = ctx
 	go func() {
 		size, err := h.store.UploadBytes(uploadCtx, key, body, "application/json")
 		if err != nil {
@@ -391,8 +390,7 @@ func (s *swallowingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (h *Handler) emitError(traceID string, reqBody []byte, reqResult uploadResult, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int, hdr http.Header) {
-	_ = reqBody
+func (h *Handler) emitError(traceID string, reqResult uploadResult, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int, hdr http.Header) {
 	tl.ResponseOut = time.Now()
 	ev := &stream.Event{
 		TraceID:         traceID,

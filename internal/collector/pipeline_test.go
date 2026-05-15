@@ -1,51 +1,14 @@
 package collector
 
 import (
-	"context"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/CoolBanHub/ailens360/internal/pricing"
 	"github.com/CoolBanHub/ailens360/internal/proxy/stream"
-	"github.com/CoolBanHub/ailens360/internal/storage/repo"
 	"github.com/CoolBanHub/ailens360/internal/tokenizer"
 )
-
-type recordingTraceRepo struct {
-	mu     sync.Mutex
-	traces []*repo.Trace
-}
-
-func (r *recordingTraceRepo) Create(context.Context, *repo.Trace) error { return nil }
-
-func (r *recordingTraceRepo) BatchCreate(_ context.Context, traces []*repo.Trace) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.traces = append(r.traces, traces...)
-	return nil
-}
-
-func (r *recordingTraceRepo) GetByID(context.Context, string) (*repo.Trace, error) {
-	return nil, repo.ErrNotFound
-}
-
-func (r *recordingTraceRepo) List(context.Context, repo.ListTraceFilter) ([]*repo.Trace, int64, error) {
-	return nil, 0, nil
-}
-
-func (r *recordingTraceRepo) ListGroups(context.Context, repo.ListTraceGroupFilter) ([]*repo.TraceGroup, int64, error) {
-	return nil, 0, nil
-}
-
-func (r *recordingTraceRepo) UsageByDimension(context.Context, string, int64, int64, string) ([]repo.UsageStat, error) {
-	return nil, nil
-}
-
-func (r *recordingTraceRepo) Facets(context.Context, string) ([]string, bool, error) {
-	return nil, false, nil
-}
 
 func TestTransformerCarriesBodyKeysAndEstimatesOutputTokens(t *testing.T) {
 	tx := NewTransformer(slog.Default(), pricing.NewCatalog(), tokenizer.New())

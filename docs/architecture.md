@@ -111,7 +111,7 @@
   - 上游特有的请求头（如 Anthropic 的 `anthropic-version`）由客户端 SDK 自己设置，代理不注入
 - **Authorization 透传**：客户端的 `Authorization` / `x-api-key` / `x-goog-api-key` 原样透传给上游；AILens360 **不持有、不替换、不存储**真实上游 Key
 - **正文上传到 MinIO**：
-  - 请求 body：内存缓冲（受 `AILENS360_PROXY_RAW_BODY_LIMIT` 限制，默认 8 MiB）→ 并行 goroutine 上传 MinIO
+  - 请求 body：内存缓冲（受 `AILENS360_PROXY_MAX_REQUEST_BODY` 限制；`.env.example` 为 10 MiB）→ 并行 goroutine 上传 MinIO
   - 响应 body：边写客户端边写 MinIO multipart uploader；`swallowingWriter` 包一层防止 MinIO 卡住客户端
   - 上传失败 → fail-open：客户端响应正常，event 中 body_key 留空
 - **XADD trace 元数据**：响应结束后把压缩 JSON event（含 body 对象 key + size + 元数据，不含 body 字节）XADD 到 `ailens360:traces` stream。失败也只记日志（已经返回客户端了）
@@ -193,7 +193,7 @@
 | 上游报错（HTTP 5xx） | 记录错误码、错误体；`ttft_ms` 为 NULL |
 | 收到 `[DONE]` 但无 usage | 用 tokenizer 估算 output_tokens，`tokens_estimated=true` |
 | 非 stream 请求 | 跳过 chunk 时间戳，`ttft_ms = NULL`，只记录 `ttfb_ms` 与 `latency_ms` |
-| 请求 body 超 `RAW_BODY_LIMIT` | 走 `http.MaxBytesReader` 拦截，返回 413（默认 8 MiB） |
+| 请求 body 超 `AILENS360_PROXY_MAX_REQUEST_BODY` | 走 `http.MaxBytesReader` 拦截，返回 413（`.env.example` 为 10 MiB；内置默认 32 MiB） |
 | MinIO 上传失败 | body_key 留空，trace 仍写入；UI 显示"正文未存档" |
 
 ### 2.3 Collector 进程
@@ -325,7 +325,7 @@ Redis Stream "ailens360:traces"
    - Authorization: 原样透传
    - 删除所有 X-AILens-* 内部 Header
 
-6. 读取完整请求 body（受 RAW_BODY_LIMIT 限制）
+6. 读取完整请求 body（受 `AILENS360_PROXY_MAX_REQUEST_BODY` 限制）
    → 启 goroutine: PUT 到 MinIO，object key = {project}/{YYYYMM}/{trace_id}/request.json
 
 7. 透传请求到上游，上游开始返回响应
@@ -413,7 +413,7 @@ v0.1 采用**单管理员 + JWT** 模型：
 | 数据 | 当前行为 |
 |---|---|
 | 请求 header | 全量保存到 PG；`Authorization` / `Cookie` / `x-api-key` / `x-goog-api-key` / `X-AILens-Project-Key` 在写入 Stream 之前强制 REDACT 为 `[redacted]` |
-| 请求 body | 上传到 MinIO（受 `RAW_BODY_LIMIT` 限制，默认 8 MiB；超限返回 413） |
+| 请求 body | 上传到 MinIO（受 `AILENS360_PROXY_MAX_REQUEST_BODY` 限制；超限返回 413） |
 | 响应 body | 流式上传到 MinIO（multipart）；MinIO 失败 → fail-open，body_key 留空 |
 | ResponseText | 解析后的纯文本（用于 token 估算），随 event 经 Redis Stream 流转；同样受截断 |
 | prompt/completion 脱敏 | **未实现**：自动脱敏手机号 / 邮箱等在路线图 |
@@ -590,7 +590,7 @@ PK `(id, created_at)` 自动是分区索引；`GetByID(id)` 不带 `created_at` 
 | 日志 | `log/slog` | Go 1.21+ 标准库，结构化日志 |
 | 配置 | 环境变量（`godotenv` 加载 `.env`） | 无 yaml，符合 12-factor |
 | Postgres 驱动 | `jackc/pgx/v5` | 性能与功能 Go 生态最佳 |
-| 数据访问 | 手写 SQL + `database/sql` | 没引入 sqlc / ORM；表结构稳定，复杂度可控 |
+| 数据访问 | 手写 SQL + `pgxpool` | 没引入 sqlc / ORM；表结构稳定，复杂度可控 |
 | Redis 客户端 | `redis/go-redis/v9` | 主流、与 pgx 风格一致 |
 | 缓存 | `hashicorp/golang-lru/v2` + Redis | L1 进程 LRU + L2 Redis + Pub/Sub 失效广播 |
 | JWT | `golang-jwt/jwt/v5` | 控制台鉴权 |
@@ -603,7 +603,7 @@ PK `(id, created_at)` 自动是分区索引；`GetByID(id)` 不带 `created_at` 
 
 - React 18 + TypeScript + Vite + Tailwind + HeroUI
 - TanStack Query 管远程数据，本地 state 用原生 hooks
-- 与后端的 API client 集中在 `frontend/src/api/`
+- 与后端的 API client 集中在 `frontend/src/lib/api.ts`
 
 ## 七、关键设计决策
 

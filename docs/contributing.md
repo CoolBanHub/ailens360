@@ -4,7 +4,7 @@
 
 ## 一、开发环境
 
-- Go **1.22+**（**无 CGO**）
+- Go **1.26+**（**无 CGO**；当前 `go.mod` 声明 `go 1.26.1`）
 - Postgres **14+** / Redis **6+** / MinIO（必备依赖；本地直接 `docker compose -f docker-compose.deps.yml up -d` 起一份）
 - Node.js **20+** 与 pnpm（仅当涉及 `frontend/` 改动）
 - `make` / `git`
@@ -70,7 +70,7 @@ pnpm dev                   # → http://localhost:5173（dev server 把 /api 反
 - TypeScript 严格模式
 - 组件库：HeroUI + Tailwind，避免再引入新的 UI 库
 - 状态管理：TanStack Query 管远程数据，本地 state 用原生 hooks
-- 与后端的 API client 集中在 `frontend/src/api/`
+- 与后端的 API client 集中在 `frontend/src/lib/api.ts`
 
 ### 4.3 测试
 

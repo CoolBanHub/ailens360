@@ -4,7 +4,7 @@
 
 ## 环境要求
 
-- Go 1.22+（**无需 CGO**）
+- Go 1.26+（**无需 CGO**；当前 `go.mod` 声明 `go 1.26.1`）
 - Postgres 14+、Redis 6+、MinIO（或任意 S3 兼容对象存储）—— 都是必备依赖；本地最简方式：`docker compose -f docker-compose.deps.yml up -d`
 - Node.js 20+ 与 pnpm（仅当需要本地跑前端控制台）
 - 任意 LLM 上游 API Key（OpenAI / Anthropic / Gemini / DeepSeek / Groq / 本地 vLLM / Ollama 均可）

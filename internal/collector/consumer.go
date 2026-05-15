@@ -213,16 +213,16 @@ func (c *Consumer) processBatch(ctx context.Context, msgs []redis.XMessage) {
 		batch = append(batch, c.transformer.Transform(ev))
 		ackIDs = append(ackIDs, m.ID)
 	}
+	opCtx := ctx
+	if opCtx.Err() != nil {
+		// Don't lose work on shutdown — the write/realtime/XACK all need a
+		// live context. Wrap a fresh background with a generous timeout.
+		var cancel context.CancelFunc
+		opCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+	}
 	if len(batch) > 0 {
-		writeCtx := ctx
-		if writeCtx.Err() != nil {
-			// Don't lose work on shutdown — the write/realtime/XACK all need a
-			// live context. Wrap a fresh background with a generous timeout.
-			var cancel context.CancelFunc
-			writeCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-		}
-		if err := c.traces.BatchCreate(writeCtx, batch); err != nil {
+		if err := c.traces.BatchCreate(opCtx, batch); err != nil {
 			c.logger.Error("trace batch insert failed", "err", err, "n", len(batch))
 			// Without ACK, the messages stay in PEL — the claim loop will give
 			// another collector a shot. Skip both ACK and realtime update on
@@ -230,11 +230,11 @@ func (c *Consumer) processBatch(ctx context.Context, msgs []redis.XMessage) {
 			return
 		}
 		if c.realtime != nil {
-			c.realtime.RecordBatch(writeCtx, realtimeSamples(batch))
+			c.realtime.RecordBatch(opCtx, realtimeSamples(batch))
 		}
 	}
 	if len(ackIDs) > 0 {
-		if err := c.rdb.XAck(ctx, c.cfg.StreamKey, c.cfg.ConsumerGroup, ackIDs...).Err(); err != nil {
+		if err := c.rdb.XAck(opCtx, c.cfg.StreamKey, c.cfg.ConsumerGroup, ackIDs...).Err(); err != nil {
 			c.logger.Warn("XACK failed", "err", err, "n", len(ackIDs))
 		}
 	}

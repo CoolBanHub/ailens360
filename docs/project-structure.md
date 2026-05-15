@@ -98,9 +98,6 @@ ailens360/
 │   ├── package.json
 │   └── vite.config.ts                 # dev proxy → http://127.0.0.1:8081（api 进程）
 │
-├── scripts/
-│   └── smoke.sh                       # 端到端 happy path 烟雾测试
-│
 ├── deploy/
 │   └── docker/Dockerfile              # 单镜像；CMD 决定 role
 │
@@ -189,7 +186,7 @@ ailens360/
 
 `stream.Event` 不携带 request/response body 字节，只携带 `RequestBodyKey` / `ResponseBodyKey` / sizes。proxy 端：
 
-- 请求 body：内存缓冲（受 `RAW_BODY_LIMIT` 限制）→ goroutine 上传 MinIO
+- 请求 body：内存缓冲（受 `AILENS360_PROXY_MAX_REQUEST_BODY` 限制）→ goroutine 上传 MinIO
 - 响应 body：边写客户端边写 MinIO multipart uploader（`internal/proxy/intercept` 的 `swallowingWriter` 防止 MinIO 报错阻塞客户端）
 
 api 端取 body 走 `/api/traces/:id/body?part=X`，默认 api 流式转发（MinIO 可内网）；`AILENS360_BODY_STORE_PRESIGN_REDIRECT=true` 时 302 → 浏览器直拉 MinIO。

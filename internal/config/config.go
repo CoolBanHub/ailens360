@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"time"
+
+	"github.com/CoolBanHub/ailens360/internal/pricing"
 )
 
 type Config struct {
@@ -262,10 +264,10 @@ func (c *Config) Defaults() {
 		c.Auth.TokenTTL = 7 * 24 * time.Hour
 	}
 	if c.Pricing.SourceURL == "" {
-		c.Pricing.SourceURL = "https://models.dev/api.json"
+		c.Pricing.SourceURL = pricing.DefaultModelsDevURL
 	}
 	if c.Pricing.RefreshInterval == 0 {
-		c.Pricing.RefreshInterval = 12 * time.Hour
+		c.Pricing.RefreshInterval = pricing.DefaultRefreshInterval
 	}
 	if c.BodyStore.Bucket == "" {
 		c.BodyStore.Bucket = "ailens360-traces"

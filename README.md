@@ -50,7 +50,7 @@ AILens360 用一个**反向代理 + 可视化控制台**的方式，让上面这
 - Redis 实时指标接口已实现，前端页面以轮询方式刷新
 
 ### 🚀 简单到极致
-- **依赖一键起**：`docker compose up -d` 起 Postgres + Redis，应用本机 `make run`
+- **依赖一键起**：`docker compose -f docker-compose.deps.yml up -d` 起 Postgres + Redis + MinIO，应用本机 `make run`
 - **应用进程无状态**：Postgres 存数据 / Redis 做缓存与实时指标，扩副本只加进程
 - **完全开源**：Apache 2.0 协议，可商用、可二开
 
@@ -179,7 +179,6 @@ client = OpenAI(
 - 多模型 A/B 对比
 - OpenTelemetry / OTLP 导出与接收
 - ClickHouse 明细存储
-- Go 服务内直接托管前端静态资源
 
 ## 部署
 
@@ -317,7 +316,7 @@ server {
 }
 ```
 
-MinIO 端点也要让浏览器可达（用于 presigned URL 拉 trace 正文）；建议反代 `s3.example.com → minio:9000`，并把这个 origin 配进 `AILENS360_BODY_STORE_PUBLIC_ENDPOINT`。
+默认由 api 进程从 MinIO 拉取 trace 正文并流式转发给浏览器，MinIO 可以只在内网可达。只有打开 `AILENS360_BODY_STORE_PRESIGN_REDIRECT=true` 时，才需要让浏览器直连 MinIO；此时建议反代 `s3.example.com → minio:9000`，并把这个 origin 配进 `AILENS360_BODY_STORE_PUBLIC_ENDPOINT`。
 
 #### 6. 升级与回滚
 
