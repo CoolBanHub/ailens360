@@ -45,11 +45,14 @@ export interface Trace {
   StatusCode: number;
   ErrorMessage: string;
   RequestHeaders: string;
-  RequestBody: string;
   RequestPath: string;
   ResponseHeaders: string;
-  ResponseBody: string;
-  StreamChunks: string;
+  // Bodies live in object storage; the row only carries the keys + sizes.
+  // Use /api/traces/:id/body?part=request|response to obtain a presigned URL.
+  RequestBodyKey: string;
+  ResponseBodyKey: string;
+  RequestBodySize: number;
+  ResponseBodySize: number;
   Timeline: string;
   InputTokens: number;
   OutputTokens: number;

@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import type { ListResp, Trace } from '../../lib/types';
 import { fmtCost, fmtCostFine, fmtDur, fmtTs } from '../../lib/fmt';
-import ChatViewer from '../../components/ChatViewer';
+import BodyViewer from '../../components/BodyViewer';
 import { TokenCell } from '../../components/TokenCell';
 import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
@@ -352,11 +352,11 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
         <>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.input')}</SectionTitle>
-            <ChatViewer raw={p.spans[0].RequestBody} mode="request" />
+            <BodyViewer traceId={p.spans[0].ID} part="request" mode="request" />
           </section>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.output')}</SectionTitle>
-            <ChatViewer raw={p.spans[p.spans.length - 1].ResponseBody} mode="response" />
+            <BodyViewer traceId={p.spans[p.spans.length - 1].ID} part="response" mode="response" />
           </section>
         </>
       )}
@@ -490,12 +490,12 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
       {/* ── Request + Response (the meat) ────────────────────────── */}
       <section className="glass glass-edge p-5">
         <SectionTitle>{tt('detail.section.request')}</SectionTitle>
-        <ChatViewer raw={t.RequestBody} mode="request" />
+        <BodyViewer traceId={t.ID} part="request" mode="request" />
       </section>
 
       <section className="glass glass-edge p-5">
         <SectionTitle>{tt(t.IsStream ? 'detail.section.streamResponse' : 'detail.section.response')}</SectionTitle>
-        <ChatViewer raw={t.ResponseBody} mode="response" />
+        <BodyViewer traceId={t.ID} part="response" mode="response" />
       </section>
 
       {/* ── Secondary details — collapsed by default ─────────────── */}

@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/CoolBanHub/ailens360/internal/bodystore"
 	"github.com/CoolBanHub/ailens360/internal/cache"
 	"github.com/CoolBanHub/ailens360/internal/project"
 	"github.com/CoolBanHub/ailens360/internal/proxy/stream"
@@ -20,15 +23,16 @@ func TestParseProxyPath(t *testing.T) {
 		wantUpstream string
 		wantOK       bool
 	}{
-		{"/p/https://api.openai.com/v1/chat/completions",
+		{"/https://api.openai.com/v1/chat/completions",
 			"https://api.openai.com/v1/chat/completions", true},
-		{"/p/https://api.anthropic.com/v1/messages",
+		{"/https://api.anthropic.com/v1/messages",
 			"https://api.anthropic.com/v1/messages", true},
-		{"/p/http://localhost:11434/v1/chat/completions",
+		{"/http://localhost:11434/v1/chat/completions",
 			"http://localhost:11434/v1/chat/completions", true},
-		{"/p/", "", false},                          // no upstream
-		{"/u/abc/foo", "", false},                   // wrong prefix
-		{"/p/https:/host/x", "https:/host/x", true}, // collapsed // — handler will reject as not absolute
+		{"/p/https://api.openai.com/v1/chat/completions", "", false}, // old shape rejected
+		{"/", "", false},                       // no upstream
+		{"/healthz", "", false},                // not a proxy path
+		{"/ftp://example.com/file", "", false}, // wrong scheme
 	}
 	for _, c := range cases {
 		up, ok := parseProxyPath(c.in)
@@ -52,11 +56,12 @@ func TestServeRejectsRequestBodyOverConfiguredLimit(t *testing.T) {
 			&proxyProjectRepo{project: &repo.Project{ID: "prj_1", ProjectKey: "abc"}},
 			&proxyProjectCache{project: &repo.Project{ID: "prj_1", ProjectKey: "abc"}},
 		),
-		Sink:     noopSink{},
-		RawLimit: 1024,
-		MaxBody:  4,
+		Sink:      noopSink{},
+		BodyStore: noopStore{},
+		RawLimit:  1024,
+		MaxBody:   4,
 	})
-	req := httptest.NewRequest(http.MethodPost, "/p/"+upstream.URL, strings.NewReader("12345"))
+	req := httptest.NewRequest(http.MethodPost, "/"+upstream.URL, strings.NewReader("12345"))
 	req.Header.Set("X-AILens-Project-Key", "abc")
 	rec := httptest.NewRecorder()
 
@@ -73,6 +78,28 @@ func TestServeRejectsRequestBodyOverConfiguredLimit(t *testing.T) {
 type noopSink struct{}
 
 func (noopSink) Submit(*stream.Event) {}
+
+type noopStore struct{}
+
+func (noopStore) UploadBytes(context.Context, string, []byte, string) (int64, error) {
+	return 0, nil
+}
+func (noopStore) NewStreamingUploader(context.Context, string, string) (bodystore.StreamingUploader, error) {
+	return discardUploader{}, nil
+}
+func (noopStore) Get(context.Context, string) (io.ReadCloser, bodystore.ObjectMeta, error) {
+	return nil, bodystore.ObjectMeta{}, errors.New("noop")
+}
+func (noopStore) PresignGet(context.Context, string) (string, error) {
+	return "", errors.New("noop")
+}
+func (noopStore) EnsureBucket(context.Context) error { return nil }
+
+type discardUploader struct{}
+
+func (discardUploader) Write(p []byte) (int, error) { return io.Discard.Write(p) }
+func (discardUploader) Close() error                { return nil }
+func (discardUploader) BytesWritten() int64         { return 0 }
 
 type proxyProjectRepo struct {
 	project *repo.Project

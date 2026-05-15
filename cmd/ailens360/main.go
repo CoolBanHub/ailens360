@@ -10,16 +10,19 @@ import (
 
 	"github.com/CoolBanHub/ailens360/internal/app"
 	"github.com/CoolBanHub/ailens360/internal/config"
-	"github.com/CoolBanHub/ailens360/internal/crypto"
 	"github.com/CoolBanHub/ailens360/internal/version"
 )
 
 const usage = `AILens360 — 360° observability for every LLM call.
 
 Usage:
-  ailens360 server [--env path]   Start the HTTP server (env path defaults to .env)
-  ailens360 keygen                Generate a base64 32-byte master key
-  ailens360 version               Print version and exit
+  ailens360 proxy [--env path]      Start the reverse-proxy process
+  ailens360 collector [--env path]  Start the trace-collector process
+  ailens360 api [--env path]        Start the REST/UI api process
+  ailens360 version                 Print version and exit
+
+Each process role consumes the same env file but only requires the config
+sections it actually touches.
 `
 
 func main() {
@@ -28,15 +31,12 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
-	case "server":
-		os.Exit(runServer(os.Args[2:]))
-	case "keygen":
-		k, err := crypto.GenerateKey()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(k)
+	case "proxy":
+		os.Exit(runRole(os.Args[2:], config.RoleProxy))
+	case "collector":
+		os.Exit(runRole(os.Args[2:], config.RoleCollector))
+	case "api":
+		os.Exit(runRole(os.Args[2:], config.RoleAPI))
 	case "version", "-v", "--version":
 		fmt.Printf("ailens360 %s (commit=%s build=%s)\n", version.Version, version.Commit, version.BuildTime)
 	default:
@@ -45,8 +45,15 @@ func main() {
 	}
 }
 
-func runServer(args []string) int {
-	fs := flag.NewFlagSet("server", flag.ExitOnError)
+// runner is the small surface every role exposes — main is intentionally
+// uniform across roles so adding a new one is a five-line change.
+type runner interface {
+	Run() <-chan error
+	Shutdown(context.Context)
+}
+
+func runRole(args []string, role config.Role) int {
+	fs := flag.NewFlagSet(string(role), flag.ExitOnError)
 	envPath := fs.String("env", ".env", "path to .env file (optional; ignored if missing)")
 	_ = fs.Parse(args)
 
@@ -55,7 +62,7 @@ func runServer(args []string) int {
 		fmt.Fprintln(os.Stderr, "load config:", err)
 		return 1
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Validate(role); err != nil {
 		fmt.Fprintln(os.Stderr, "config invalid:", err)
 		return 1
 	}
@@ -63,30 +70,49 @@ func runServer(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a, err := app.Build(ctx, cfg)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "build app:", err)
+	var r runner
+	switch role {
+	case config.RoleProxy:
+		p, err := app.BuildProxy(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "build proxy:", err)
+			return 1
+		}
+		r = p
+	case config.RoleCollector:
+		c, err := app.BuildCollector(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "build collector:", err)
+			return 1
+		}
+		r = c
+	case config.RoleAPI:
+		a, err := app.BuildAPI(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "build api:", err)
+			return 1
+		}
+		r = a
+	default:
+		fmt.Fprintln(os.Stderr, "unknown role:", role)
 		return 1
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	errCh := make(chan error, 1)
-	go func() { errCh <- a.Run() }()
+	errCh := r.Run()
 
 	var runErr error
 	select {
 	case sig := <-sigCh:
-		a.Logger.Info("signal received", "sig", sig.String())
+		fmt.Fprintln(os.Stderr, "signal received:", sig.String())
 	case runErr = <-errCh:
 		if runErr != nil {
-			a.Logger.Error("http server exited", "err", runErr)
+			fmt.Fprintln(os.Stderr, "server exited:", runErr)
 		}
 	}
-	a.Shutdown(context.Background())
+	r.Shutdown(context.Background())
 	if runErr != nil {
-		// Surface bind failures and unexpected ListenAndServe errors to the
-		// process supervisor so failed starts aren't reported as success.
 		return 1
 	}
 	return 0

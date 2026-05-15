@@ -1,7 +1,8 @@
 # 系统架构设计
 
-> **基线**：Postgres + Redis 是必备依赖，应用进程无状态，多副本水平扩展只需扩 `ailens360` 进程数。
-> 单进程同时承载 `/p/` 代理流量、`/api/` 控制台 API、`/healthz`、`/version`。
+> **基线**：Postgres + Redis + MinIO（或任意 S3 兼容对象存储）三套依赖。
+> 应用由三个无状态进程组成 —— `proxy` / `collector` / `api`，共享同一个二进制。
+> 任一进程崩溃不波及其他；多副本水平扩展按 role 独立。
 > 项目尚未上线就直接选择了分布式就绪架构，避免后续返工，没有 "单机 SQLite" 路径。
 
 ## 一、整体架构
@@ -13,87 +14,89 @@
 │  │ Python   │  │ Node.js  │  │ Go       │  │ Java     │          │
 │  │ App      │  │ App      │  │ App      │  │ App      │          │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘          │
-│       │             │             │             │                 │
 │       └─────────────┴─────────────┴─────────────┘                 │
 │                          │                                         │
-│  baseURL 指向 AILens360 (host/p/{完整上游 URL})                    │
-│  请求头 X-AILens-Project-Key 标识项目归属                           │
+│  baseURL = proxy_origin/{完整上游 URL}                              │
+│  请求头  X-AILens-Project-Key: <64-char base62>                   │
+│  请求头  Authorization: <真实上游 Key，原样透传>                    │
 └──────────────────────────┼──────────────────────────────────────┘
-                           │  HTTP / SSE，Authorization 透传
+                           │  HTTP / SSE
                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                  AILens360 (单进程，可多副本)                       │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Proxy Layer (反向代理)                         │  │
-│  │  ┌──────────────────────────────┐                          │  │
-│  │  │ parseProxyPath               │                          │  │
-│  │  │ (内嵌上游完整 URL)             │                          │  │
-│  │  └──────────────┬───────────────┘                          │  │
-│  │                 ▼                                            │  │
-│  │  ┌──────────────────────────────────┐                      │  │
-│  │  │ Project Resolver                  │ L1 LRU → L2 Redis → DB │  │
-│  │  │ (X-AILens-Project-Key → project)  │ Pub/Sub 失效广播      │  │
-│  │  └──────────────┬───────────────────┘                      │  │
-│  │                 ▼                                            │  │
-│  │  ┌──────────────────────────────┐                          │  │
-│  │  │ DetectFromHost(upstream.Host) │  仅用于挑解析器/打 tag    │  │
-│  │  └──────────────┬───────────────┘                          │  │
-│  │                 ▼                                            │  │
-│  │  ┌────────────────────────────────────┐                    │  │
-│  │  │ Pass-through Forwarder              │                    │  │
-│  │  │ URL = 内嵌上游 URL, Authorization 透传│                    │  │
-│  │  └──────────────┬─────────────────────┘                    │  │
-│  │                 ▼                                            │  │
-│  │              ┌───────────────┐                             │  │
-│  │              │ Stream Parser │  按 provider tag 选择        │  │
-│  │              │ openai/anthr/ │  对应 SSE 解析器             │  │
-│  │              │ gemini        │                             │  │
-│  │              └───────┬───────┘                             │  │
-│  └──────────────────────┼─────────────────────────────────────┘  │
-│                         │ 异步                                     │
-│  ┌──────────────────────▼─────────────────────────────────────┐  │
-│  │              Collector (指标聚合)                          │  │
-│  │  - Token 计算    - 延迟统计    - 错误归因                  │  │
-│  │  - 存储前 REDACT Authorization / x-api-key / Cookie        │  │
-│  └──────────────────────┬─────────────────────────────────────┘  │
-│                         │                                          │
-│  ┌──────────────────────▼─────────────────────────────────────┐  │
-│  │              Storage Layer (Postgres + Redis)              │  │
-│  │  projects / traces                                          │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                    │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              API Server (Go stdlib + chi)                  │  │
-│  │  REST API（JWT 鉴权）                                        │  │
-│  └──────────────────────┬─────────────────────────────────────┘  │
-└─────────────────────────┼──────────────────────────────────────┘
-                          │
-                          ▼
-                  ┌───────────────┐
-                  │ Web Console   │
-                  │ (React + TS)  │
-                  └───────────────┘
-                          │
-                          ▼
-                  ┌───────────────┐
-                  │ LLM Providers │
-                  │ OpenAI, etc.  │
-                  └───────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│   ailens360 proxy (:8080)  — LLM 流量入口，对外仅这一个端口        │
+│   - 解析 /<scheme>://<upstream>                                   │
+│   - X-AILens-Project-Key → project_id（L1 LRU + L2 Redis）       │
+│   - 透传 Authorization 到上游                                      │
+│   - 按上游 host 选 SSE 解析器（openai / anthropic / gemini）        │
+│   - 边读边写：[客户端] [MinIO multipart uploader] [parser pipe]    │
+└──────────┬───────────────────────────────────────────────────────┘
+           │ ① PUT body objects             │ ③ XADD compact event
+           ▼                                ▼
+   ┌───────────────┐                  ┌───────────────────────┐
+   │ MinIO / S3    │ ◄────────────────│ Redis                 │
+   │  bodies       │   presigned GET  │  - Stream IPC         │
+   │  (内网/可选外  │                  │  - project cache L2   │
+   │   网 + CORS)  │                  │  - realtime metrics   │
+   └───────────────┘                  │  - pricing warm cache │
+           ▲                          └────┬──────────────────┘
+           │                               │ XREADGROUP
+           │                               ▼
+           │              ┌────────────────────────────────────┐
+           │              │   ailens360 collector (:8082 hc)    │
+           │              │   - 消费 Stream → batch transform   │
+           │              │   - tokenize + pricing + cost       │
+           │              │   - COPY into PG traces 分区表       │
+           │              │   - 更新 realtime 指标               │
+           │              │   - 后台 goroutine：分区维护         │
+           │              │   - 启动时：apply migrations         │
+           │              └─────────────┬──────────────────────┘
+           │                            │ COPY
+           │                            ▼
+           │              ┌────────────────────────────────────┐
+           │              │   PostgreSQL                        │
+           │              │   - traces (RANGE PARTITION 月)     │
+           │              │   - projects                        │
+           │              └────────────┬───────────────────────┘
+           │                           │ read
+           │              ┌────────────▼───────────────────────┐
+           │ stream bytes │   ailens360 api (:8081)            │
+           └──────────────│   - REST /api/* + 静态 UI          │
+                          │   - JWT 鉴权                        │
+                          │   - GET /api/traces/:id/body       │
+                          │     默认流式转发 MinIO 字节         │
+                          │     PRESIGN_REDIRECT=true → 302    │
+                          │   - pricing refresher → Redis       │
+                          └────────────┬───────────────────────┘
+                                       │
+                                       ▼
+                              ┌───────────────┐
+                              │ Web Console   │
+                              │ (React + TS)  │
+                              └───────────────┘
 ```
+
+**故障矩阵**：
+
+| 哪个挂 | 表现 |
+|---|---|
+| collector | proxy 继续服务、Stream 堆积、collector 重启后追上 |
+| MinIO | proxy 继续服务、body_key 留空、UI 显示"正文未存档" |
+| Redis | proxy 仍返回响应、trace 丢、project 缓存降级到 PG |
+| api | 代理不受影响、控制台无法访问 |
 
 ## 二、核心组件
 
-### 2.1 Proxy Layer（反向代理层）
+### 2.1 Proxy 进程（反向代理）
 
-**职责**：接收用户应用的请求，从 URL 路径中拆出**内嵌的完整上游 URL**，再从 `X-AILens-Project-Key` 头解析 Project，把请求**原样透传到客户端指定的上游**，同时记录全过程。
+**职责**：接收用户应用的请求，从 URL 路径中拆出**内嵌的完整上游 URL**，再从 `X-AILens-Project-Key` 头解析 Project，把请求**原样透传到客户端指定的上游**，同时把请求/响应正文上传到 MinIO、把 trace 元数据 XADD 到 Redis Stream。
 
 **关键设计**：
 
-- **URL-embedded upstream 路由**：所有代理流量都形如 `/p/{完整上游 URL，含 scheme}`
-  - 例：`/p/https://api.openai.com/v1/chat/completions`
+- **URL-embedded upstream 路由**：代理流量形如 `/<scheme>://<完整上游 URL>`
+  - 例：`/https://api.openai.com/v1/chat/completions`
   - 上游 URL 由**客户端在 baseURL 里直接指定**；AILens360 不持有任何 per-project 上游配置
   - 任何 OpenAI 兼容服务（DeepSeek / Groq / Together / Moonshot / 本地 vLLM / Ollama）都能直接接入
-- **手动路径解析（chi wildcard）**：因为内嵌 URL 含 `://` 这种结构，chi 路由的 `{var}` 捕获会把路径段里的连续 `/` 折叠 / 归一化，导致 scheme 信息丢失。代理因此使用 `/p/*` 通配挂载，再在 `parseProxyPath` 中**手动解析 `r.URL.Path`**（Go 的 `net/http` 会在 `r.URL.Path` 上保留原始的 `//`），直接把 `/p/` 后面的剩余部分作为完整上游 URL。实现见 `internal/proxy/handler.go`。
+- **手动路径解析（chi catch-all）**：因为内嵌 URL 含 `://` 这种结构，chi 路由的 `{var}` 捕获会把路径段里的连续 `/` 折叠 / 归一化，导致 scheme 信息丢失。代理因此使用 `/*` 通配挂载（更具体的 `/healthz` 先匹配），再在 `parseProxyPath` 中**手动解析 `r.URL.Path`**（Go 的 `net/http` 会在 `r.URL.Path` 上保留原始的 `//`），剥掉前导 `/` 后校验 `http://` / `https://` 前缀即可。实现见 `internal/proxy/handler.go`。
 - **Project 解析**：
   - 项目身份由 `X-AILens-Project-Key` 请求头识别；缺失头返回 401 `missing_project_key`
   - `project_key` 在创建 Project 时生成（64 位 base62，约 381 bits 熵），控制台支持「重置」轮换；轮换会同步从缓存 evict 旧 key 并广播
@@ -107,10 +110,13 @@
 - **统一 pass-through 转发**：所有上游共用一个透传转发器
   - 上游特有的请求头（如 Anthropic 的 `anthropic-version`）由客户端 SDK 自己设置，代理不注入
 - **Authorization 透传**：客户端的 `Authorization` / `x-api-key` / `x-goog-api-key` 原样透传给上游；AILens360 **不持有、不替换、不存储**真实上游 Key
-- **流式响应处理**：用 `httputil.ReverseProxy` + tee reader/writer 边转发边解析 SSE
-- **零 buffer 透传**：响应流式回传给客户端，不等待完整接收
-- **异步落库**：解析和存储完全异步，不阻塞响应；`trace.request_path` 记录**上游绝对 URL**（含 scheme + host + path + query）
-- **敏感 Header REDACT**：trace 落库前对 `Authorization` / `Cookie` / `x-api-key` / `x-goog-api-key` 统一替换为 `[redacted]`，保证真实 Key 不进入存储、不进入 API 响应
+- **正文上传到 MinIO**：
+  - 请求 body：内存缓冲（受 `AILENS360_PROXY_RAW_BODY_LIMIT` 限制，默认 8 MiB）→ 并行 goroutine 上传 MinIO
+  - 响应 body：边写客户端边写 MinIO multipart uploader；`swallowingWriter` 包一层防止 MinIO 卡住客户端
+  - 上传失败 → fail-open：客户端响应正常，event 中 body_key 留空
+- **XADD trace 元数据**：响应结束后把压缩 JSON event（含 body 对象 key + size + 元数据，不含 body 字节）XADD 到 `ailens360:traces` stream。失败也只记日志（已经返回客户端了）
+- **不直接写 PG**：proxy 进程**不接触** PG `traces` 表，DB 慢查询 / 锁不会影响代理路径
+- **敏感 Header REDACT**：event 内的 header map 在序列化前对 `Authorization` / `Cookie` / `x-api-key` / `x-goog-api-key` 统一替换为 `[redacted]`，保证真实 Key 不进入 Stream、不进入 PG、不进入 API 响应
 
 ### 2.2 Stream Parser（流式解析器）
 
@@ -187,27 +193,45 @@
 | 上游报错（HTTP 5xx） | 记录错误码、错误体；`ttft_ms` 为 NULL |
 | 收到 `[DONE]` 但无 usage | 用 tokenizer 估算 output_tokens，`tokens_estimated=true` |
 | 非 stream 请求 | 跳过 chunk 时间戳，`ttft_ms = NULL`，只记录 `ttfb_ms` 与 `latency_ms` |
-| 请求/响应原文超限 | 按 `collector.raw_body_limit`（默认 256 KiB）截断，超限部分丢弃 |
+| 请求 body 超 `RAW_BODY_LIMIT` | 走 `http.MaxBytesReader` 拦截，返回 413（默认 8 MiB） |
+| MinIO 上传失败 | body_key 留空，trace 仍写入；UI 显示"正文未存档" |
 
-### 2.3 Collector（指标聚合）
+### 2.3 Collector 进程
 
-**职责**：消费 Stream Parser 输出的事件流，落库 trace 明细，并维护实时聚合指标。
+**职责**：消费 Redis Stream `ailens360:traces`，把 event → `repo.Trace`，COPY 批量入 PG，维护实时指标，跑分区维护。
 
-**Pipeline 设计**（纯 channel + goroutine，无第三方框架）：
+**Pipeline 设计**（XREADGROUP → batch → COPY，不再走 channel）：
 
 ```
-Stream Parser ──► eventCh ──► [Token Calculator] ──┐
-                                                    │
-                                                    ▼
-                                              ┌──────────┐
-                                              │ Persister│ ──► Postgres (异步批量写)
-                                              └──────────┘
-                                                    │
-                                                    ▼
-                                          ┌────────────────┐
-                                          │ Realtime Pub   │ ──► Redis 计数器
-                                          └────────────────┘
+Redis Stream "ailens360:traces"
+       │ XREADGROUP BLOCK 5s COUNT 200
+       ▼
+┌──────────────────────────┐
+│  Consumer  (主循环)        │
+│  - decode JSON event     │
+│  - Transformer.Transform │ ← tokenize + pricing + 派生指标
+│  - batch [*repo.Trace]   │
+└────────────┬─────────────┘
+             ▼
+   ┌──────────────────┐         ┌──────────────────┐
+   │ TraceRepo COPY    │ ──────► │ PG traces (分区)  │
+   │ BatchCreate       │         └──────────────────┘
+   └────────┬─────────┘
+            ▼
+   ┌──────────────────┐         ┌──────────────────┐
+   │ Realtime.Record   │ ──────► │ Redis 计数器     │
+   │ Batch             │         └──────────────────┘
+   └────────┬─────────┘
+            │ XACK ids
+            ▼
+       ✓ ack
 ```
+
+**消费组**：
+
+- 组名：`collector`（可配，但通常一个集群一个组）
+- consumer name：`${HOSTNAME}-${PID}` —— 多副本天然分片
+- **PEL reclaimer**：后台 goroutine 每 30s 跑一次 `XAUTOCLAIM`，把 idle 超过 `PENDING_IDLE_MAX`（默认 60s）的消息从死掉的副本搬过来；防止 collector 副本崩溃造成消息卡死
 
 **核心指标分类**：
 
@@ -217,26 +241,46 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 - **质量**：finish_reason 分布、错误率、stream_status（completed / aborted / errored / stalled）
 - **业务**：按 project / model / user / session / tag 多维度聚合
 
-**实时指标**：Redis 维护 QPS、最近 1/5/15 分钟的 ttft、错误率、tokens/秒、各 Project 计数；Web Console 长窗口查询直接读预聚合（v0.4+ 落地 `metrics_*` 物化表，避免扫主表）。
+**实时指标**：Redis 维护 QPS、最近 1/5/15 分钟的 ttft、错误率、tokens/秒、各 Project 计数；Web Console 长窗口查询直接读预聚合。
+
+**Token 估算策略**：当上游未返回 usage 时，collector 用 ResponseText（随 event 一起 XADD 过来）通过 tokenizer 估算 output_tokens。input 估算被砍掉了 —— request body 字节不进 Stream，无法在 collector 侧重算；现代上游基本都返回 usage，这个 fallback 罕用。
+
+**分区维护**：`internal/partition.Maintainer` 在 collector 启动时同步建当前月 + N 个未来月分区（默认 N=1），并启动 24h 周期 goroutine 重复执行。可选 `AILENS360_PARTITION_RETENTION_MONTHS > 0` 自动 DETACH 超龄分区（不 DROP，归档交给运维）。
+
+**Migrations 所有权**：collector 启动时跑 `postgres.Migrate(ctx, pool)`。proxy / api 启动不动 schema，避免多进程并发跑迁移。
 
 ### 2.4 Storage Layer
 
-存储层职责：元数据持久化（Postgres）+ 缓存与实时计数（Redis）。详见 [§五 数据模型](#五数据模型)。
+存储层职责：
 
-### 2.5 API Server
+- **PostgreSQL**：trace 元数据（按月分区）+ project 配置
+- **Redis**：project 缓存 L2 + Pub/Sub 失效广播 + 实时指标 + Stream IPC + pricing 暖缓存
+- **MinIO/S3**：请求 / 响应正文，PG 主表只存对象 key
+
+详见 [§五 数据模型](#五数据模型)。
+
+### 2.5 API 进程
 
 **协议**：REST（v0.1）；WebSocket 实时推送规划在 v0.2+。
 
-**v0.1 已挂载的路由**（见 `internal/api/router.go`）：
+**v0.1 已挂载的路由**（见 `internal/api/router.go`，监听 `:8081`）：
 
 - `POST /api/auth/login` —— 用户名/密码换取 JWT
 - `GET  /api/auth/me` —— 当前登录态
 - `POST/GET/PUT/DELETE /api/projects[/{id}]` —— Project CRUD
 - `GET  /api/traces` —— Span 列表（支持 `project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / 时间范围过滤）
-- `GET  /api/traces/{id}` —— Span 详情
+- `GET  /api/traces/{id}` —— Span 详情（不含 body）
+- `GET  /api/traces/{id}/body?part=request|response` —— body 字节
+  - 默认：api 从 MinIO 拉字节流式转发给浏览器，MinIO 可内网
+  - `AILENS360_BODY_STORE_PRESIGN_REDIRECT=true`：返回 302 → 浏览器直拉 MinIO（要求 MinIO 对外可达 + CORS）
 - `GET  /api/trace_groups` —— Langfuse 风格逻辑 trace 聚合（按 `trace_id` 收敛）
 - `GET  /api/metrics/usage` —— 用量聚合（维度：model / project / day / hour）
 - `GET  /healthz` / `GET /version`
+
+**额外职责**：
+
+- **pricing.Refresher**：定期从 models.dev 拉价格表写到 Redis 暖缓存 `pricing:models.dev:v1`；collector 进程从此 key 读
+- **静态 UI 托管**：`frontend/dist` 由 SPA fallback handler 提供
 
 **规划中、尚未挂载**：`POST /api/traces/{id}/replay`、`WS /api/stream`、OTLP receiver。
 
@@ -258,45 +302,76 @@ Stream Parser ──► eventCh ──► [Token Calculator] ──┐
 
 ## 三、数据流
 
-### 3.1 请求路径
+### 3.1 请求路径（proxy 进程内 + 跨进程）
 
 ```
-1. 用户应用发起 POST http://your.host/p/https://api.openai.com/v1/chat/completions
+1. 用户应用发起 POST http://proxy.host/https://api.openai.com/v1/chat/completions
    Header: Authorization: Bearer sk-real-openai-key
            X-AILens-Project-Key: <64-char base62>
-2. Proxy 接收，挂在 /p/* 通配路由上，parseProxyPath 从 r.URL.Path 解析：
-   a. upstream_url = "https://api.openai.com/v1/chat/completions"
-      (Go net/http 保留原始 "//"，因此 scheme 不会丢失)
-3. 读取 X-AILens-Project-Key 头，查三层缓存 (LRU → Redis → Postgres)
+
+2. proxy 进程接收（chi catch-all 路由 + healthz 例外）：
+   parseProxyPath 剥掉前导 "/" 并校验 http:// 或 https:// 前缀
+   → upstream_url = "https://api.openai.com/v1/chat/completions"
+   (Go net/http 保留原始 "//"，scheme 不丢)
+
+3. 读 X-AILens-Project-Key，查三层缓存 (LRU → Redis → Postgres)
    → 拿到 project_id；缺失头返回 401，未命中返回 404
-4. 按 upstream.Host 在 stream 包内部选解析器（api.openai.com → OpenAI 解析器）
-   不影响转发目标，trace 也不带厂商标签
-5. 改写请求：
-   - URL: 直接使用 upstream_url（scheme + host + path + query 原样）
-   - Authorization: 原样透传，不替换
-   - 删除所有 X-AILens-* 内部 Header（含 X-AILens-Project-Key）
-6. 通过有界 tee 复制请求体摘要/原文（供异步落库）
-7. 透传请求到上游
-8. 上游返回响应（可能是 SSE 流）
-9. Proxy 用 streamTeeWriter 同时：
-   a. 把数据写回客户端（保证低延迟）
-   b. 边转发边送入对应的 SSE Parser，并有上限地保留 raw 片段
-10. 客户端收到完整响应
-11. 异步：Parser 解析 buffer → Collector 计算指标
-    → 存储前 REDACT 敏感 Header（含 X-AILens-Project-Key）→ Postgres 按 project_id 落库
-    （trace.request_path 写入完整上游 URL，便于回放）
+
+4. 按 upstream.Host 在 stream 包内部选解析器
+   (api.openai.com → OpenAI 解析器)
+
+5. 改写出站请求：
+   - URL: 直接使用 upstream_url
+   - Authorization: 原样透传
+   - 删除所有 X-AILens-* 内部 Header
+
+6. 读取完整请求 body（受 RAW_BODY_LIMIT 限制）
+   → 启 goroutine: PUT 到 MinIO，object key = {project}/{YYYYMM}/{trace_id}/request.json
+
+7. 透传请求到上游，上游开始返回响应
+
+8. proxy 用 io.MultiWriter 同时写三处：
+   a. http.ResponseWriter        (客户端，最优先)
+   b. bodystore streamingUploader (MinIO multipart 上传)
+   c. parser io.PipeWriter       (按上游 host 选的 SSE 解析器)
+   swallowingWriter 包了 (b) — MinIO 卡了不会拖累 (a)
+
+9. 流结束后 / 非流响应读完后：
+   - 关闭 multipart uploader 等 MinIO 完成
+   - 等步骤 6 的请求 body 上传 goroutine 完成
+   - Parser.Finalize 把 token / finish_reason 等填进 stream.Event
+
+10. 在 event 中 REDACT 敏感 header（Authorization / Cookie / x-api-key / X-AILens-Project-Key）
+    → marshal JSON → XADD ailens360:traces VALUES data=<json>
+    （事件载荷不含 body 字节，只含 body_key + size + ResponseText 截断版）
+
+11. 客户端连接已经独立完成，无须等 XADD
+
+跨进程：
+12. collector XREADGROUP 拉到上面那条 event
+13. Transformer 算 token (用 ResponseText) / cost / 派生指标
+14. batch 累积到 200 条或下次 read 没拿到新消息时：
+    - TraceRepo.BatchCreate → COPY into traces 分区表
+    - Realtime.RecordBatch → Redis 计数器
+    - XACK 这批 message id
 ```
 
 ### 3.2 查询路径
 
 ```
-1. 用户打开 Web Console
+1. 用户打开 Web Console（api 进程托管，:8081）
 2. React 调用 REST API：GET /api/traces?project_id=proj_xxx&limit=50
-3. API Server 查 Postgres → 返回 trace 列表
+3. api 查 PG → 返回 trace 列表（不含 body）
+
 4. 用户点击某条 trace
 5. React 调用 GET /api/traces/:id
-6. API Server 读取完整请求/响应（敏感 Header 已 REDACT）
-7. 渲染详情
+6. api 读取 span 元数据（敏感 Header 已 REDACT）
+
+7. React 渲染详情 + 触发 GET /api/traces/:id/body?part=request|response
+8. api：
+   - 默认模式：bodystore.Get → io.Copy 到 response writer，转发 Content-Encoding: gzip
+   - PRESIGN 模式：bodystore.PresignGet → 302 Location: <presigned-minio-url>
+9. 浏览器拿到 body 字节（gzip 自动解码），喂给 ChatViewer 渲染
 ```
 
 ## 四、安全模型
@@ -337,17 +412,18 @@ v0.1 采用**单管理员 + JWT** 模型：
 
 | 数据 | 当前行为 |
 |---|---|
-| 请求 header | 全量保存；`Authorization` / `Cookie` / `x-api-key` / `x-goog-api-key` 强制 REDACT 为 `[redacted]` |
-| 请求 body | 保存原文，超过 `collector.raw_body_limit`（默认 256 KiB）后截断 |
-| 响应 body | 同上 |
-| stream chunk | 保存归一化 chunk 与原始片段，受上限保护 |
+| 请求 header | 全量保存到 PG；`Authorization` / `Cookie` / `x-api-key` / `x-goog-api-key` / `X-AILens-Project-Key` 在写入 Stream 之前强制 REDACT 为 `[redacted]` |
+| 请求 body | 上传到 MinIO（受 `RAW_BODY_LIMIT` 限制，默认 8 MiB；超限返回 413） |
+| 响应 body | 流式上传到 MinIO（multipart）；MinIO 失败 → fail-open，body_key 留空 |
+| ResponseText | 解析后的纯文本（用于 token 估算），随 event 经 Redis Stream 流转；同样受截断 |
 | prompt/completion 脱敏 | **未实现**：自动脱敏手机号 / 邮箱等在路线图 |
 
-trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 Authorization 已被 REDACT，绝不在 trace 详情、trace 列表 API、Web Console 中以明文出现。
+PG `traces` 表**完全不存 body 字节**，只保留 body 在对象存储中的 key + size；body 的真正持久层是 MinIO/S3。客户端透传的上游 Authorization 已被 REDACT，绝不在 trace 详情、trace 列表 API、Web Console 中以明文出现。
 
 ### 4.5 数据保留与日志
 
-- trace 明细默认保留 30 天（清理任务规划中）；删除 Project 时可级联删除 trace。
+- trace 明细按月分区；设 `AILENS360_PARTITION_RETENTION_MONTHS > 0` 时，超龄分区自动 DETACH（不 DROP，运维决定归档或彻底删除）
+- body 对象在 MinIO/S3，建议用对象存储自身的 Lifecycle policy 按月清理（key 前缀含 `YYYYMM` 方便规则书写）
 - 日志不输出客户端透传的 Authorization / x-api-key / x-goog-api-key 明文；上游错误体进 trace 前必须按规则脱敏。
 - 代理返回给客户端的错误保持 SDK 兼容，但不暴露内部配置 / DB 错误细节。
 
@@ -357,11 +433,12 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 
 ### 5.1 设计原则
 
-1. **一级实体只有两张表**：`projects` 与 `traces`。
+1. **一级实体只有两张表**：`projects` 与 `traces`（后者是分区表，子分区 `traces_YYYYMM` 自动生成）。
 2. **Trace 即 Span**：每一次代理转发的上游 HTTP 调用对应 `traces` 表中一行。多行通过 `trace_id` 聚合成一次"逻辑 trace"（Langfuse 语义），便于多步 Agent 场景的链路视图。
 3. **敏感 Header 入库前 REDACT**：见 §4.2。
-4. **请求 / 响应原文有上限**：`collector.raw_body_limit`（默认 256 KiB）。
+4. **请求 / 响应正文外置**：bodies 存 MinIO/S3，PG 只保留对象 key + size，主表瘦身、备份变小。
 5. **时间戳统一为 Unix 毫秒**（traces）/ Unix 秒（projects），`BIGINT` 存储，避免驱动层时区问题。
+6. **按月分区 + Go 维护作业**：`traces` `PARTITION BY RANGE (created_at)`，collector 进程同时建当前月 + 未来月分区；可选 `RETENTION_MONTHS` 自动 DETACH 老分区。
 
 ### 5.2 `projects`
 
@@ -379,15 +456,17 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 
 **生命周期约束**：Project 删除后 `project_key` 永不复用；控制台「重置 project_key」会写入新值并把旧值从缓存 evict 掉，同时通过 Pub/Sub 广播到其他副本（`internal/project/resolver.go`）。
 
-### 5.3 `traces`
+### 5.3 `traces`（分区表）
 
 每次代理转发到上游的 HTTP 调用一行。语义上是 **logical trace 的一个 span**——多行通过 `trace_id` 聚合。
+
+声明为 `PARTITION BY RANGE (created_at)`；子分区按月（`traces_YYYYMM`）由 collector 进程的分区维护器自动建。PK 必须包含分区键，因此为 `(id, created_at)`。
 
 #### 标识与归属
 
 | 列 | 类型 | 含义 |
 |---|---|---|
-| `id` | TEXT PK | Span ID |
+| `id` | TEXT | Span ID（PK 一部分，与 `created_at` 组合） |
 | `trace_id` | TEXT | 逻辑 trace ID。来自 `X-AILens-Trace-Id`；未指定时与 `id` 相等 |
 | `trace_name` | TEXT | 逻辑 trace 的人类标签，来自 `X-AILens-Trace-Name` |
 | `project_id` | TEXT NOT NULL | 关联 `projects.id` |
@@ -413,15 +492,18 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 | `finish_reason` | TEXT | LLM 完成原因（`stop` / `length` / ...） |
 | `stream_status` | TEXT | 流状态机末态：`completed` / `aborted` / `errored` / `stalled` |
 
-#### 请求 / 响应原文
+#### 请求 / 响应正文（外置 + 元数据）
+
+正文字节存对象存储；这里只存 key + size。空 `*_body_key` 表示上传失败或被跳过。
 
 | 列 | 类型 | 含义 |
 |---|---|---|
 | `request_headers` | TEXT | JSON 字符串，敏感 Header 已 REDACT |
-| `request_body` | TEXT | 请求 body，超 `raw_body_limit` 截断 |
 | `response_headers` | TEXT | JSON 字符串 |
-| `response_body` | TEXT | 非流式：完整响应 JSON；流式：拼接后的 delta 文本（截断） |
-| `stream_chunks` | TEXT | 流式 chunk 的 JSON 数组 |
+| `request_body_key` | TEXT | MinIO/S3 对象 key，例如 `proj_xxx/202605/tr_yyy/request.json` |
+| `response_body_key` | TEXT | 同上 |
+| `request_body_size` | BIGINT | 上传到对象存储的字节数（gzip 前的原始字节） |
+| `response_body_size` | BIGINT | 同上 |
 | `timeline` | TEXT | 关键事件时间戳 JSON 数组 |
 
 #### Token 与成本
@@ -454,6 +536,8 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 
 #### 索引
 
+声明在父表上的分区索引（PG 12+ 自动传播到子分区）：
+
 | 索引 | 列 | 用途 |
 |---|---|---|
 | `idx_traces_project_created` | `(project_id, created_at DESC)` | Project 维度列表 |
@@ -462,6 +546,8 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 | `idx_traces_user_created` | `(user_id, created_at DESC)` | 按业务用户下钻 |
 | `idx_traces_session_created` | `(session_id, created_at DESC)` | 按会话聚合 |
 | `idx_traces_trace_id_created` | `(trace_id, created_at ASC)` | 逻辑 trace 内 span 升序展开 |
+
+PK `(id, created_at)` 自动是分区索引；`GetByID(id)` 不带 `created_at` 时无法做分区裁剪，会扫所有子分区，但每个子分区都有 PK 索引，trace 详情访问可接受。
 
 ### 5.4 视图层逻辑：TraceGroup
 
@@ -498,7 +584,9 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 | 用途 | 选型 | 理由 |
 |---|---|---|
 | HTTP 路由 | `go-chi/chi/v5` | 轻量、stdlib 兼容、中间件机制清晰 |
-| 反向代理 | `net/http/httputil.ReverseProxy` | 标准库，零依赖 |
+| 反向代理 | `net/http` + io.MultiWriter | 自己写 ~200 行，避免 `httputil.ReverseProxy` 对响应体的二次包装；流式分流给 client/MinIO/parser 更直观 |
+| 对象存储客户端 | `minio/minio-go/v7` | 轻量，AWS S3 / MinIO 全兼容 |
+| Stream IPC | `redis/go-redis/v9` 的 XADD / XREADGROUP / XAUTOCLAIM | 无新中间件依赖 |
 | 日志 | `log/slog` | Go 1.21+ 标准库，结构化日志 |
 | 配置 | 环境变量（`godotenv` 加载 `.env`） | 无 yaml，符合 12-factor |
 | Postgres 驱动 | `jackc/pgx/v5` | 性能与功能 Go 生态最佳 |
@@ -553,24 +641,26 @@ trace 存储中**只保留请求 body 与元数据**；客户端透传的上游 
 把**完整上游 URL 直接拼到代理路径**之后，"上游是谁"完全交还给客户端：
 
 ```
-http://localhost:8080/p/https://api.deepseek.com/v1
-http://localhost:8080/p/https://api.groq.com/openai/v1
-http://localhost:8080/p/http://localhost:11434/v1            # Ollama
-http://localhost:8080/p/https://api.anthropic.com
+http://localhost:8080/https://api.deepseek.com/v1
+http://localhost:8080/https://api.groq.com/openai/v1
+http://localhost:8080/http://localhost:11434/v1            # Ollama
+http://localhost:8080/https://api.anthropic.com
 ```
 
 AILens360 侧不需要任何 per-project 上游配置，"Project 只是观测维度，不是路由约束"的精神保留。代价是客户端 baseURL 略长，但只配置一次，且 SDK 不感知。
 
-### 7.3 为什么从一开始就用 Postgres + Redis，而不是 SQLite？
+### 7.3 为什么从一开始就用 Postgres + Redis + MinIO，而不是 SQLite？
 
 虽然单机 SQLite 能"30 秒跑起来"，但：
 
 - AILens360 处于 LLM 应用的关键路径，上线后立刻面临 trace 写入压力，SQLite 单写锁会卡住主流程
 - project_key 解析必须支持多副本一致的失效广播，SQLite 路径无法做 Pub/Sub
-- "等用户多了再迁移"意味着仓储 / 缓存 / 实时计数三处实现都要重做，业务代码也会被迫迁移
+- proxy 与 collector 之间需要持久化队列削峰，Redis Stream 是天然之选；SQLite 路径要么自己造 outbox 表，要么放弃异步
+- 大 body 直接进 SQLite 会让数据库膨胀到不可备份，分库分表又把简单事情复杂化；S3 / MinIO 才是 body 该去的地方
+- "等用户多了再迁移"意味着仓储 / 缓存 / 实时计数 / IPC / body 存储五处实现都要重做，业务代码也会被迫迁移
 - 项目尚未上线就直接选分布式就绪基线，避免后续返工
 
-代价是初次部署多两个依赖（一份 `docker compose` 起 Postgres + Redis 就够），换得无状态可扩、Key 解析一致性、生产可用的实时指标。
+代价是初次部署多三个依赖（一份 `docker compose -f docker-compose.deps.yml up -d` 起 Postgres + Redis + MinIO 就够），换得无状态可扩、Key 解析一致性、生产可用的实时指标、proxy 不被慢路径拖累。
 
 ### 7.4 为什么不强制 OpenTelemetry？
 
@@ -582,20 +672,32 @@ AILens360 侧不需要任何 per-project 上游配置，"Project 只是观测维
 
 AILens360 处于 LLM 应用的**关键路径**——每一次调用都要经过它。核心原则：
 
-- **代理路径无状态**：所有副本完全对等，可任意扩缩容
-- **写入路径异步**：内存 channel + 批量写 Postgres；上层规划用 MQ 解耦（NATS JetStream，v0.4+）
+- **代理路径独占进程**：proxy 进程不写 PG、不跑 pricing 计算、不跑 tokenizer。任何统计 / DB 代码挂掉都不会牵连代理
+- **写入路径异步 + 队列削峰**：proxy XADD 到 Redis Stream → collector 消费；上游慢、PG 慢都不阻塞代理
 - **三层缓存解决 project_key 热点**：L1 进程 LRU → L2 Redis → L3 Postgres，Pub/Sub 广播失效
-- **存储分层规划**：当前 Postgres 通吃；trace 量级压力出现后引入 ClickHouse（明细）+ S3 / OSS（大对象）
+- **正文外置**：MinIO/S3 承载 body 字节，PG `traces` 表瘦身，备份恢复都更轻
+- **PG 月度分区**：单分区单调可控；旧数据 DETACH 不影响热分区
 
-**性能目标（v1.0 验收）**：单实例 ≥ 5000 QPS、并发流连接 10K+、代理透传开销 P99 < 5ms、集群线性扩展到 100K+ QPS。
+**水平扩缩容方案**：
+
+| 维度 | 怎么扩 |
+|---|---|
+| 代理流量 | proxy 副本多开（无状态对等），前置 LB |
+| 控制台 / API 请求 | api 副本多开（无状态对等）|
+| Stream 消费速率 | collector 副本多开 —— 同一 consumer group 自动分片，XAUTOCLAIM 救场死副本 |
+| Stream 堆积 | 升级 Redis 单机内存 / 切 Cluster |
+| body 存储 | MinIO 分布式部署 / 切 AWS S3 |
+| PG 写入 | 单实例足够时不必动；后续可上 Citus / 切 ClickHouse 明细 |
+
+**性能目标（v1.0 验收）**：单 proxy 副本 ≥ 5000 QPS、并发流连接 10K+、代理透传开销 P99 < 5ms、集群线性扩展到 100K+ QPS。
 
 ## 九、未来扩展点
 
-- **Replay**：选中历史 trace 一键重放（数据条件已满足，路由 v0.2+ 落地）
+- **Replay**：选中历史 trace 一键重放（body 在 MinIO 易取，路由 v0.2+ 落地）
 - **Project 级软配额 / 限流**：QPS / 日 token / 月成本上限（v0.3）
 - **告警规则**：成本超阈值、错误率突增 → Webhook（v0.3）
-- **预聚合指标表**：避免大时间窗口扫主表（v0.4+）
-- **MQ 解耦写入路径**：NATS JetStream，Proxy 与 Collector 分离（v0.4+）
-- **OpenTelemetry 接收端点**：OTLP HTTP/gRPC（v0.4+）
+- **预聚合指标表**：避免大时间窗口扫主表
+- **OpenTelemetry 接收端点**：OTLP HTTP/gRPC
+- **ClickHouse 明细存储**：取代 PG `traces` 分区方案，进一步压缩 + 加速分析查询
 - **Plugin 系统**：Lua / JS 脚本做请求改写、prompt 增强
 - **多用户 + RBAC**：Owner / Admin / Viewer + 控制台 API Key（v0.3）

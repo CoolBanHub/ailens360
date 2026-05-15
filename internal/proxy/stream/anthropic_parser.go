@@ -14,7 +14,7 @@ import (
 //	message_start → content_block_start → content_block_delta (*) →
 //	content_block_stop → message_delta → message_stop
 type AnthropicParser struct {
-	chunks          []ChunkRecord
+	chunkCount      int
 	textBuilder     strings.Builder
 	inputTokens     int
 	outputTokens    int
@@ -71,8 +71,7 @@ func (p *AnthropicParser) Feed(r io.Reader, tl *Timeline, onFirstToken func(time
 }
 
 func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
-	seq := len(p.chunks)
-	rec := ChunkRecord{Seq: seq, Ts: now.UnixMilli(), Raw: capRaw(ev.Raw)}
+	p.chunkCount++
 	switch ev.Event {
 	case "message_start":
 		var m anthMessageStart
@@ -103,7 +102,6 @@ func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken
 			}
 			p.textBuilder.WriteString(d.Delta.Text)
 			tl.LastToken = now
-			rec.DeltaText = d.Delta.Text
 		}
 	case "message_delta":
 		var m anthMessageDelta
@@ -123,13 +121,11 @@ func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken
 			}
 		}
 	}
-	p.chunks = append(p.chunks, rec)
 }
 
 func (p *AnthropicParser) Finalize(ev *Event) {
 	ev.ResponseText = p.textBuilder.String()
-	ev.StreamChunks = p.chunks
-	ev.ChunkCount = len(p.chunks)
+	ev.ChunkCount = p.chunkCount
 	ev.FinishReason = p.finishReason
 	if p.usageSeen {
 		ev.InputTokens = p.inputTokens

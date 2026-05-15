@@ -3,27 +3,41 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/CoolBanHub/ailens360/internal/api/response"
 	"github.com/CoolBanHub/ailens360/internal/auth"
+	"github.com/CoolBanHub/ailens360/internal/bodystore"
 	"github.com/CoolBanHub/ailens360/internal/metrics"
 	"github.com/CoolBanHub/ailens360/internal/project"
 	"github.com/CoolBanHub/ailens360/internal/storage/repo"
 )
 
 type Handlers struct {
-	Projects *project.Service
-	Resolver *project.Resolver
-	Traces   repo.TraceRepo
-	Auth     *auth.Service
-	Realtime *metrics.Realtime
+	Projects  *project.Service
+	Resolver  *project.Resolver
+	Traces    repo.TraceRepo
+	Auth      *auth.Service
+	Realtime  *metrics.Realtime
+	BodyStore bodystore.Store
 	// PublicURL, if set, overrides the request-derived origin used to build
-	// proxy_prefix values returned by the project endpoints.
+	// proxy_prefix values returned by the project endpoints. Required in
+	// production (behind a reverse proxy / different hostnames per role).
 	PublicURL string
+	// ProxyAddr is the proxy process's listen address (e.g. "0.0.0.0:8080").
+	// Used to derive the proxy port when PublicURL is empty — otherwise the
+	// derivation would use the request's own port, which is the api listener
+	// (e.g. :8081), not the proxy.
+	ProxyAddr string
+	// PresignRedirect: when true, /api/traces/:id/body 302s to a presigned
+	// MinIO URL (browser fetches direct, api is bypassed). When false, the
+	// api streams bytes through itself (default; keeps MinIO private).
+	PresignRedirect bool
 }
 
 // ---- Projects ----
@@ -136,10 +150,11 @@ func (h *Handlers) ResetProjectKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // projectView shapes a project for the API. proxy_prefix is the deployment-wide
-// prefix clients prepend to their upstream URL:
+// origin of the proxy listener; clients construct their upstream URL by joining
+// the prefix and the full upstream URL with a single `/`:
 //
 //	client.base_url = "{proxy_prefix}/{your_real_upstream_base_url}"
-//	e.g. "http://localhost:8080/p/https://api.openai.com/v1"
+//	e.g. "http://localhost:8080/https://api.openai.com/v1"
 //
 // The project itself is identified by the X-AILens-Project-Key header carrying
 // the value of `project_key`.
@@ -162,7 +177,7 @@ func (h *Handlers) projectView(p *repo.Project, r *http.Request) map[string]any 
 
 func (h *Handlers) buildProxyPrefix(r *http.Request) string {
 	if h.PublicURL != "" {
-		return h.PublicURL + "/p"
+		return h.PublicURL
 	}
 	scheme := "http"
 	if r.TLS != nil {
@@ -175,7 +190,34 @@ func (h *Handlers) buildProxyPrefix(r *http.Request) string {
 	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
 		host = fh
 	}
-	return scheme + "://" + host + "/p"
+	// The request hit the api process, so r.Host carries the api port. Swap
+	// in the proxy port so the generated examples point to the right listener.
+	if h.ProxyAddr != "" {
+		host = swapPort(host, listenPort(h.ProxyAddr))
+	}
+	return scheme + "://" + host
+}
+
+// listenPort extracts the port from an address like "0.0.0.0:8080" / "[::]:8080" / ":8080".
+// Returns "" if it can't, leaving the original host untouched in swapPort.
+func listenPort(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 && i < len(addr)-1 {
+		return addr[i+1:]
+	}
+	return ""
+}
+
+func swapPort(hostPort, newPort string) string {
+	if newPort == "" {
+		return hostPort
+	}
+	// Strip any existing port. Use LastIndex so IPv6 brackets are preserved.
+	i := strings.LastIndex(hostPort, ":")
+	bracketed := strings.HasPrefix(hostPort, "[")
+	if i > 0 && (!bracketed || strings.Contains(hostPort[i:], "]:")) {
+		hostPort = hostPort[:i]
+	}
+	return hostPort + ":" + newPort
 }
 
 // ---- Traces ----
@@ -217,6 +259,75 @@ func (h *Handlers) GetTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.OK(w, t)
+}
+
+// GetTraceBody hands the browser the raw request or response body. Behaviour
+// depends on PresignRedirect:
+//   - true  → 302 redirect to a presigned MinIO URL; browser fetches direct.
+//   - false → bytes are streamed from MinIO through this handler. The
+//     ContentEncoding header (typically "gzip") is forwarded as-is so the
+//     browser's decoder handles decompression.
+func (h *Handlers) GetTraceBody(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	part := r.URL.Query().Get("part")
+	if part != "request" && part != "response" {
+		response.Error(w, http.StatusBadRequest, 40000, "part must be 'request' or 'response'")
+		return
+	}
+	if h.BodyStore == nil {
+		response.Error(w, http.StatusServiceUnavailable, 50300, "body store unavailable")
+		return
+	}
+	t, err := h.Traces.GetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			response.Error(w, http.StatusNotFound, 40400, "trace not found")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, 50001, err.Error())
+		return
+	}
+	var key string
+	if part == "request" {
+		key = t.RequestBodyKey
+	} else {
+		key = t.ResponseBodyKey
+	}
+	if key == "" {
+		response.Error(w, http.StatusNotFound, 40401, "body not stored for this trace (upload may have failed)")
+		return
+	}
+
+	if h.PresignRedirect {
+		u, err := h.BodyStore.PresignGet(r.Context(), key)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, 50002, "presign failed: "+err.Error())
+			return
+		}
+		http.Redirect(w, r, u, http.StatusFound)
+		return
+	}
+
+	rc, meta, err := h.BodyStore.Get(r.Context(), key)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, 50002, "fetch failed: "+err.Error())
+		return
+	}
+	defer rc.Close()
+	if meta.ContentType != "" {
+		w.Header().Set("Content-Type", meta.ContentType)
+	}
+	if meta.ContentEncoding != "" {
+		w.Header().Set("Content-Encoding", meta.ContentEncoding)
+	}
+	if meta.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+	}
+	if _, err := io.Copy(w, rc); err != nil {
+		// Body already partially sent; just log via the chi recovery layer.
+		// We can't write an error response at this point — headers are flushed.
+		return
+	}
 }
 
 // ListTraceGroups returns the Langfuse-style logical trace list (one row per

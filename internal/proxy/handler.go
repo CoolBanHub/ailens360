@@ -11,30 +11,40 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/CoolBanHub/ailens360/internal/bodystore"
 	"github.com/CoolBanHub/ailens360/internal/project"
 	"github.com/CoolBanHub/ailens360/internal/proxy/intercept"
 	"github.com/CoolBanHub/ailens360/internal/proxy/stream"
 	"github.com/CoolBanHub/ailens360/pkg/shortid"
 )
 
+// Submitter is the minimal sink interface the handler depends on. The
+// production implementation is *StreamSink; tests inject a no-op.
+type Submitter interface {
+	Submit(*stream.Event)
+}
+
 type Handler struct {
 	logger     *slog.Logger
 	resolver   *project.Resolver
-	sink       EventSink
+	sink       Submitter
+	store      bodystore.Store
 	rawLimit   int
 	maxReqBody int64
 	httpClient *http.Client
 }
 
 type Deps struct {
-	Logger   *slog.Logger
-	Resolver *project.Resolver
-	Sink     EventSink
-	RawLimit int
-	MaxBody  int64
-	Timeout  time.Duration
+	Logger    *slog.Logger
+	Resolver  *project.Resolver
+	Sink      Submitter
+	BodyStore bodystore.Store
+	RawLimit  int
+	MaxBody   int64
+	Timeout   time.Duration
 }
 
 func NewHandler(d Deps) *Handler {
@@ -50,31 +60,32 @@ func NewHandler(d Deps) *Handler {
 		logger:     d.Logger,
 		resolver:   d.Resolver,
 		sink:       d.Sink,
+		store:      d.BodyStore,
 		rawLimit:   limit,
 		maxReqBody: d.MaxBody,
 		httpClient: &http.Client{Timeout: timeout},
 	}
 }
 
-// Mount registers the proxy route. We avoid chi's `{var}` capture for the
-// upstream URL — chi's wildcard normalises path segments and would collapse the
-// `//` in `https://` — so the handler parses r.URL.Path directly.
+// Mount registers the catch-all route. The handler treats any path that begins
+// with `/http://` or `/https://` as a proxy request; anything else (including
+// `/healthz` registered on the same router) is left to the caller.
 func (h *Handler) Mount(mux interface {
 	HandleFunc(pattern string, h http.HandlerFunc)
 }) {
-	mux.HandleFunc("/p/*", h.serve)
+	mux.HandleFunc("/*", h.serve)
 }
 
 // parseProxyPath extracts the embedded upstream URL from a proxy request path.
-// The expected shape is `/p/{upstream_url}` where {upstream_url} starts with a
-// scheme such as `https://`. The project the request belongs to is identified
-// out-of-band via the X-AILens-Project-Key header, not the path.
+// The expected shape is `/<scheme>://<rest>` where scheme is http or https.
+// The project the request belongs to is identified out-of-band via the
+// X-AILens-Project-Key header.
 func parseProxyPath(p string) (upstream string, ok bool) {
-	if !strings.HasPrefix(p, "/p/") {
+	if len(p) == 0 || p[0] != '/' {
 		return "", false
 	}
-	rest := p[len("/p/"):]
-	if rest == "" {
+	rest := p[1:]
+	if !strings.HasPrefix(rest, "http://") && !strings.HasPrefix(rest, "https://") {
 		return "", false
 	}
 	return rest, true
@@ -86,7 +97,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	upstreamRaw, ok := parseProxyPath(r.URL.Path)
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "invalid_path",
-			"expected /p/{upstream_url}, e.g. /p/https://api.openai.com/v1/chat/completions")
+			"expected /<scheme>://<upstream>, e.g. /https://api.openai.com/v1/chat/completions")
 		return
 	}
 
@@ -130,54 +141,31 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	logicTraceID := r.Header.Get("X-AILens-Trace-Id")
 	traceName := r.Header.Get("X-AILens-Trace-Name")
 
-	// Snapshot request headers + body before sending. Limit body size.
-	var reqBodyCopy []byte
-	if r.Body != nil {
-		body := r.Body
-		if h.maxReqBody > 0 {
-			body = http.MaxBytesReader(w, r.Body, h.maxReqBody)
-		}
-		limited := io.LimitReader(body, int64(h.rawLimit)+1)
-		buf, err := io.ReadAll(limited)
-		if err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				_ = r.Body.Close()
-				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
-					fmt.Sprintf("request body exceeds configured limit of %d bytes", maxErr.Limit))
-				return
-			}
-			h.logger.Warn("read request body", "err", err)
-		}
-		reqBodyCopy = buf
-		if len(reqBodyCopy) > h.rawLimit {
-			reqBodyCopy = reqBodyCopy[:h.rawLimit]
-		}
-		// Build outgoing body: we need the full original, so combine with any unread tail.
-		var fullBody bytes.Buffer
-		fullBody.Write(buf)
-		if _, err := io.Copy(&fullBody, body); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				_ = r.Body.Close()
-				writeJSONError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
-					fmt.Sprintf("request body exceeds configured limit of %d bytes", maxErr.Limit))
-				return
-			}
-			h.logger.Warn("read request body", "err", err)
-		}
-		_ = r.Body.Close()
-		r.Body = io.NopCloser(bytes.NewReader(fullBody.Bytes()))
-		r.ContentLength = int64(fullBody.Len())
+	traceID := "tr_" + shortid.MustNew(16)
+
+	// Read the request body once into memory (bounded by maxReqBody).
+	reqBody, err := h.readRequestBody(r, w)
+	if err != nil {
+		// readRequestBody has already written the error response.
+		return
 	}
 
-	model, isStream := peekModelAndStream(reqBodyCopy)
+	model, isStream := peekModelAndStream(reqBody)
+
+	// Kick off the request body upload in parallel with the upstream call.
+	// Whatever finishes last gets joined back at event-build time. The key is
+	// reserved deterministically up front so the trace event can refer to it
+	// even before the upload completes.
+	reqKey := bodystore.Key(proj.ID, time.Now(), traceID, bodystore.PartRequest, "json")
+	reqUpload := h.uploadRequestAsync(r.Context(), reqKey, reqBody)
 
 	// Build outbound request: point it at the embedded upstream URL.
 	outReq := r.Clone(context.WithoutCancel(r.Context()))
 	outReq.RequestURI = ""
 	outReq.URL = upstreamURL
 	outReq.Host = upstreamURL.Host
+	outReq.Body = io.NopCloser(bytes.NewReader(reqBody))
+	outReq.ContentLength = int64(len(reqBody))
 	outReq.Header.Del("X-Forwarded-Host")
 	// Strip Accept-Encoding so Go's Transport auto-adds gzip AND auto-decompresses
 	// the upstream response into plain bytes. That way the trace stores readable
@@ -191,7 +179,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("upstream request failed", "err", err, "host", upstreamURL.Host)
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
-		h.emitError(reqBodyCopy, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0)
+		reqResult := reqUpload.wait()
+		h.emitError(traceID, reqBody, reqResult, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0, r.Header)
 		return
 	}
 	defer resp.Body.Close()
@@ -206,32 +195,65 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	parser := stream.NewParserForHost(upstreamURL.Host)
-	cw := intercept.NewCapturingWriter(w, h.rawLimit, nil)
-
 	contentType := resp.Header.Get("Content-Type")
 	streaming := isStream || strings.Contains(strings.ToLower(contentType), "text/event-stream")
 
+	// Streaming responses skip the snapshot buffer (would waste RAM); non-stream
+	// responses keep a buffer up to rawLimit so the parser has bytes to parse.
+	bufLimit := h.rawLimit
 	if streaming {
-		pr, pw := io.Pipe()
-		done := make(chan struct{})
+		bufLimit = 0
+	}
+	cw := intercept.NewCapturingWriter(w, bufLimit, nil)
+
+	// Open the response body uploader. If MinIO is unavailable, NewStreamingUploader
+	// returns an error and we fall back to fail-open (no key in event).
+	respKey := bodystore.Key(proj.ID, time.Now(), traceID, bodystore.PartResponse, "bin")
+	respUploader, respUploaderErr := h.store.NewStreamingUploader(context.Background(), respKey, contentType)
+	if respUploaderErr != nil {
+		h.logger.Warn("response body uploader unavailable", "err", respUploaderErr, "trace_id", traceID)
+	}
+
+	// Compose tees: always client (cw); body store if available; parser pipe if streaming.
+	writers := []io.Writer{cw}
+	if respUploader != nil {
+		writers = append(writers, &swallowingWriter{w: respUploader})
+	}
+	var pw *io.PipeWriter
+	var parserDone chan struct{}
+	if streaming {
+		var pr *io.PipeReader
+		pr, pw = io.Pipe()
+		parserDone = make(chan struct{})
 		go func() {
-			defer close(done)
+			defer close(parserDone)
 			firstTokenCb := func(ts time.Time) { tl.FirstToken = ts }
 			parser.Feed(pr, &tl, firstTokenCb)
 		}()
-		mw := io.MultiWriter(cw, pw)
-		if _, err := io.Copy(mw, resp.Body); err != nil {
-			h.logger.Warn("stream copy interrupted", "err", err)
-		}
+		writers = append(writers, pw)
+	}
+	mw := io.MultiWriter(writers...)
+	if _, err := io.Copy(mw, resp.Body); err != nil {
+		h.logger.Warn("response copy interrupted", "err", err, "trace_id", traceID)
+	}
+	if pw != nil {
 		_ = pw.Close()
-		<-done
-		cw.Flush()
-		tl.UpstreamDone = time.Now()
-	} else {
-		if _, err := io.Copy(cw, resp.Body); err != nil {
-			h.logger.Warn("response copy interrupted", "err", err)
+	}
+	if parserDone != nil {
+		<-parserDone
+	}
+	cw.Flush()
+	tl.UpstreamDone = time.Now()
+
+	var respKeyFinal string
+	var respSize int64
+	if respUploader != nil {
+		if err := respUploader.Close(); err != nil {
+			h.logger.Warn("response body upload failed", "err", err, "trace_id", traceID)
+		} else {
+			respKeyFinal = respKey
+			respSize = respUploader.BytesWritten()
 		}
-		tl.UpstreamDone = time.Now()
 	}
 	tl.ResponseOut = time.Now()
 
@@ -240,24 +262,28 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		statusCode = resp.StatusCode
 	}
 
+	reqResult := reqUpload.wait()
+
 	ev := &stream.Event{
-		TraceID:         "tr_" + shortid.MustNew(16),
-		IsStream:        streaming,
-		Model:           model,
-		StatusCode:      statusCode,
-		ProjectID:       proj.ID,
-		UserID:          userID,
-		SessionID:       sessionID,
-		Tags:            tags,
-		LogicTraceID:    logicTraceID,
-		TraceName:       traceName,
-		RequestHeaders:  cloneHeader(r.Header),
-		RequestBody:     reqBodyCopy,
-		RequestPath:     upstreamURL.String(),
-		ResponseHeaders: cloneHeader(resp.Header),
-		ResponseBody:    body,
-		BytesStreamed:   bytesTotal,
-		Timeline:        tl,
+		TraceID:          traceID,
+		IsStream:         streaming,
+		Model:            model,
+		StatusCode:       statusCode,
+		ProjectID:        proj.ID,
+		UserID:           userID,
+		SessionID:        sessionID,
+		Tags:             tags,
+		LogicTraceID:     logicTraceID,
+		TraceName:        traceName,
+		RequestHeaders:   cloneHeader(r.Header),
+		RequestPath:      upstreamURL.String(),
+		ResponseHeaders:  cloneHeader(resp.Header),
+		RequestBodyKey:   reqResult.key,
+		RequestBodySize:  reqResult.size,
+		ResponseBodyKey:  respKeyFinal,
+		ResponseBodySize: respSize,
+		BytesStreamed:    bytesTotal,
+		Timeline:         tl,
 	}
 	if streaming {
 		parser.Finalize(ev)
@@ -280,24 +306,112 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	h.sink.Submit(ev)
 }
 
-func (h *Handler) emitError(reqBody []byte, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int) {
+// readRequestBody reads at most maxReqBody bytes; if the cap is exceeded it
+// writes a 413 response and returns an error so the caller can bail. The
+// returned slice is the full body — there's no separate "preserved tail" any
+// more because we always need the whole body for upstream + uploading.
+func (h *Handler) readRequestBody(r *http.Request, w http.ResponseWriter) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	body := r.Body
+	if h.maxReqBody > 0 {
+		body = http.MaxBytesReader(w, r.Body, h.maxReqBody)
+	}
+	buf, err := io.ReadAll(body)
+	_ = r.Body.Close()
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
+				fmt.Sprintf("request body exceeds configured limit of %d bytes", maxErr.Limit))
+			return nil, err
+		}
+		h.logger.Warn("read request body", "err", err)
+		return buf, nil
+	}
+	return buf, nil
+}
+
+type uploadResult struct {
+	key  string
+	size int64
+}
+
+type asyncUpload struct {
+	doneCh chan uploadResult
+}
+
+func (u *asyncUpload) wait() uploadResult {
+	if u == nil || u.doneCh == nil {
+		return uploadResult{}
+	}
+	return <-u.doneCh
+}
+
+// uploadRequestAsync starts an upload of the buffered request body in a
+// goroutine and returns a handle that .wait()s for the result. If the body is
+// empty, returns a nil handle (wait() will return a zero uploadResult).
+func (h *Handler) uploadRequestAsync(ctx context.Context, key string, body []byte) *asyncUpload {
+	if len(body) == 0 || h.store == nil {
+		return nil
+	}
+	u := &asyncUpload{doneCh: make(chan uploadResult, 1)}
+	// Detach from the inbound request's context so an early client cancel
+	// doesn't kill the upload — the bodystore enforces its own timeout.
+	uploadCtx := context.Background()
+	_ = ctx
+	go func() {
+		size, err := h.store.UploadBytes(uploadCtx, key, body, "application/json")
+		if err != nil {
+			h.logger.Warn("request body upload failed", "err", err, "key", key)
+			u.doneCh <- uploadResult{}
+			return
+		}
+		u.doneCh <- uploadResult{key: key, size: size}
+	}()
+	return u
+}
+
+// swallowingWriter prevents errors from the body-store writer from propagating
+// up through io.MultiWriter (which short-circuits on first error). The client
+// must keep receiving bytes even if MinIO is sick.
+type swallowingWriter struct {
+	w       io.Writer
+	dropped atomic.Bool
+}
+
+func (s *swallowingWriter) Write(p []byte) (int, error) {
+	if s.dropped.Load() {
+		return len(p), nil
+	}
+	if _, err := s.w.Write(p); err != nil {
+		s.dropped.Store(true)
+	}
+	return len(p), nil
+}
+
+func (h *Handler) emitError(traceID string, reqBody []byte, reqResult uploadResult, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int, hdr http.Header) {
+	_ = reqBody
 	tl.ResponseOut = time.Now()
 	ev := &stream.Event{
-		TraceID:      "tr_" + shortid.MustNew(16),
-		IsStream:     isStream,
-		Model:        model,
-		StatusCode:   status,
-		Status:       "error",
-		StreamStatus: "errored",
-		ErrorMsg:     e.Error(),
-		ProjectID:    projectID,
-		UserID:       userID,
-		SessionID:    sessionID,
-		Tags:         tags,
-		LogicTraceID: logicTraceID,
-		TraceName:    traceName,
-		RequestBody:  reqBody,
-		Timeline:     tl,
+		TraceID:         traceID,
+		IsStream:        isStream,
+		Model:           model,
+		StatusCode:      status,
+		Status:          "error",
+		StreamStatus:    "errored",
+		ErrorMsg:        e.Error(),
+		ProjectID:       projectID,
+		UserID:          userID,
+		SessionID:       sessionID,
+		Tags:            tags,
+		LogicTraceID:    logicTraceID,
+		TraceName:       traceName,
+		RequestHeaders:  cloneHeader(hdr),
+		RequestBodyKey:  reqResult.key,
+		RequestBodySize: reqResult.size,
+		Timeline:        tl,
 	}
 	h.sink.Submit(ev)
 }

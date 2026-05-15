@@ -70,9 +70,10 @@ COPY --from=ui-build /ui/dist /app/ui
 RUN chown -R ailens:ailens /app
 
 USER ailens
-EXPOSE 8080
+EXPOSE 8080 8081 8082
 
 # Configuration is provided entirely via environment variables.
 # Mount a .env file at /app/.env, or inject env vars directly via the runtime.
+# Choose role via CMD: proxy / collector / api.
 ENTRYPOINT ["/usr/local/bin/ailens360"]
-CMD ["server"]
+CMD ["api"]

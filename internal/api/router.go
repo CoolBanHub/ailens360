@@ -58,6 +58,8 @@ func Mount(r chi.Router, d RouterDeps) {
 		r.Route("/traces", func(r chi.Router) {
 			r.Get("/", h.ListTraces)
 			r.Get("/{id}", h.GetTrace)
+			// Presigned GET URL to fetch raw body bytes from the body store.
+			r.Get("/{id}/body", h.GetTraceBody)
 		})
 
 		r.Get("/metrics/usage", h.Usage)

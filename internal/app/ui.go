@@ -70,9 +70,7 @@ func isReservedRoute(p string) bool {
 	return p == "/healthz" ||
 		p == "/version" ||
 		p == "/api" ||
-		strings.HasPrefix(p, "/api/") ||
-		p == "/p" ||
-		strings.HasPrefix(p, "/p/")
+		strings.HasPrefix(p, "/api/")
 }
 
 func canServeFile(root fs.FS, name string) bool {

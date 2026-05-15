@@ -1,6 +1,6 @@
-# 仅启动 ailens360 所需的基础设施（Postgres + Redis）。
-# 应用本身 (ailens360) 通过 `make build && ./bin/ailens360 server ...`
-# 在宿主机直接运行，方便开发与调试。生产环境再考虑容器化。
+# 仅启动 ailens360 所需的基础设施（Postgres + Redis + MinIO）。
+# 应用本身（proxy / collector / api 三进程）通过 `make build` + `make run`
+# 在宿主机直接运行，方便开发与调试。生产环境再考虑容器化（见 docker-compose.yml）。
 services:
   postgres:
     image: postgres:16-alpine
@@ -35,6 +35,28 @@ services:
       timeout: 3s
       retries: 10
 
+  minio:
+    image: minio/minio:latest
+    container_name: ailens-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      # S3 API
+      - "9000:9000"
+      # Web console
+      - "9001:9001"
+    volumes:
+      - ailens-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   ailens-pg:
   ailens-redis:
+  ailens-minio:

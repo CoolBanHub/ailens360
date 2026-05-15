@@ -14,7 +14,7 @@ import (
 // Frames are JSON objects in `data:` SSE lines; the last frame typically carries
 // `usageMetadata`.
 type GeminiParser struct {
-	chunks        []ChunkRecord
+	chunkCount    int
 	textBuilder   strings.Builder
 	inputTokens   int
 	outputTokens  int
@@ -54,7 +54,8 @@ func (p *GeminiParser) Feed(r io.Reader, tl *Timeline, onFirstToken func(time.Ti
 		if ev != nil && len(ev.Data) > 0 {
 			now := time.Now()
 			tl.AppendChunk(now)
-			p.handleChunk(bytes.TrimSpace(ev.Data), ev.Raw, len(p.chunks), now, onFirstToken, tl)
+			p.chunkCount++
+			p.handleChunk(bytes.TrimSpace(ev.Data), now, onFirstToken, tl)
 		}
 		if err != nil {
 			return
@@ -62,11 +63,9 @@ func (p *GeminiParser) Feed(r io.Reader, tl *Timeline, onFirstToken func(time.Ti
 	}
 }
 
-func (p *GeminiParser) handleChunk(data, raw []byte, seq int, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
-	rec := ChunkRecord{Seq: seq, Ts: now.UnixMilli(), Raw: capRaw(raw)}
+func (p *GeminiParser) handleChunk(data []byte, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
 	var c geminiChunk
 	if err := json.Unmarshal(data, &c); err != nil {
-		p.chunks = append(p.chunks, rec)
 		return
 	}
 	if c.ModelVersion != "" && p.model == "" {
@@ -90,7 +89,6 @@ func (p *GeminiParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 		}
 		p.textBuilder.WriteString(delta)
 		tl.LastToken = now
-		rec.DeltaText = delta
 	}
 	if c.UsageMetadata != nil {
 		p.inputTokens = c.UsageMetadata.PromptTokenCount
@@ -100,7 +98,6 @@ func (p *GeminiParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 		p.reasoningToks = c.UsageMetadata.ThoughtsTokenCount
 		p.usageSeen = true
 	}
-	p.chunks = append(p.chunks, rec)
 }
 
 // Token normalization: Gemini's promptTokenCount is the FULL prompt
@@ -109,8 +106,7 @@ func (p *GeminiParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 // equivalent OpenAI parser comment.
 func (p *GeminiParser) Finalize(ev *Event) {
 	ev.ResponseText = p.textBuilder.String()
-	ev.StreamChunks = p.chunks
-	ev.ChunkCount = len(p.chunks)
+	ev.ChunkCount = p.chunkCount
 	ev.FinishReason = p.finishReason
 	if p.usageSeen {
 		ev.InputTokens = max(p.inputTokens-p.cachedInToks, 0)

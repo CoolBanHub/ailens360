@@ -12,8 +12,16 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_project_key ON projects(project_key);
 
+-- `traces` is RANGE-partitioned by created_at (ms since epoch) — one partition
+-- per calendar month. The Go maintainer in internal/partition pre-creates the
+-- current month and N future months and (optionally) detaches expired ones,
+-- so no DBA cron is required.
+--
+-- Bodies live in object storage. `request_body_key` / `response_body_key`
+-- point to objects in the configured bucket; size is the uncompressed byte
+-- count. Empty key means upload failed or was not attempted.
 CREATE TABLE IF NOT EXISTS traces (
-    id                 TEXT PRIMARY KEY,
+    id                 TEXT NOT NULL,
     trace_id           TEXT NOT NULL DEFAULT '',
     trace_name         TEXT NOT NULL DEFAULT '',
     project_id         TEXT NOT NULL,
@@ -26,11 +34,12 @@ CREATE TABLE IF NOT EXISTS traces (
     status_code        INTEGER NOT NULL,
     error_message      TEXT NOT NULL DEFAULT '',
     request_headers    TEXT NOT NULL DEFAULT '',
-    request_body       TEXT NOT NULL DEFAULT '',
     request_path       TEXT NOT NULL DEFAULT '',
     response_headers   TEXT NOT NULL DEFAULT '',
-    response_body      TEXT NOT NULL DEFAULT '',
-    stream_chunks      TEXT NOT NULL DEFAULT '',
+    request_body_key   TEXT NOT NULL DEFAULT '',
+    response_body_key  TEXT NOT NULL DEFAULT '',
+    request_body_size  BIGINT NOT NULL DEFAULT 0,
+    response_body_size BIGINT NOT NULL DEFAULT 0,
     timeline           TEXT NOT NULL DEFAULT '',
     input_tokens                INTEGER NOT NULL DEFAULT 0,
     output_tokens               INTEGER NOT NULL DEFAULT 0,
@@ -49,11 +58,16 @@ CREATE TABLE IF NOT EXISTS traces (
     bytes_streamed     BIGINT NOT NULL DEFAULT 0,
     finish_reason      TEXT NOT NULL DEFAULT '',
     stream_status      TEXT NOT NULL DEFAULT '',
-    created_at         BIGINT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_traces_project_created  ON traces(project_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_traces_model            ON traces(model, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_traces_status           ON traces(status);
-CREATE INDEX IF NOT EXISTS idx_traces_user_created     ON traces(user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_traces_session_created  ON traces(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_traces_trace_id_created ON traces(trace_id, created_at ASC);
+    created_at         BIGINT NOT NULL,
+    -- PK must include the partition key on declarative partitions.
+    PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+-- Partitioned indexes — automatically propagate to every child partition
+-- created later by the Go maintainer.
+CREATE INDEX IF NOT EXISTS idx_traces_project_created  ON traces (project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_traces_model            ON traces (model, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_traces_status           ON traces (status);
+CREATE INDEX IF NOT EXISTS idx_traces_user_created     ON traces (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_traces_session_created  ON traces (session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_traces_trace_id_created ON traces (trace_id, created_at ASC);

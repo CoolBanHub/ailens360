@@ -5,7 +5,7 @@
 ## 一、开发环境
 
 - Go **1.22+**（**无 CGO**）
-- Postgres **14+** 与 Redis **6+**（必备依赖；本地直接 `docker compose -f docker-compose.deps.yml up -d` 起一份）
+- Postgres **14+** / Redis **6+** / MinIO（必备依赖；本地直接 `docker compose -f docker-compose.deps.yml up -d` 起一份）
 - Node.js **20+** 与 pnpm（仅当涉及 `frontend/` 改动）
 - `make` / `git`
 
@@ -20,10 +20,11 @@
 git clone https://github.com/CoolBanHub/ailens360.git
 cd ailens360
 
-cp .env.example .env       # 填好 AILENS360_JWT_SECRET / DB_DSN / REDIS_ADDR
+cp .env.example .env       # 填好 AILENS360_JWT_SECRET / DB_DSN / REDIS_ADDR / BODY_STORE_*
 go mod download
 make build                 # → ./bin/ailens360
-make run                   # 启动后端，监听 :8080
+make run                   # 同时启三个进程：proxy(:8080) collector(:8082) api(:8081)
+                           # 或分别用 make run-proxy / run-collector / run-api 单独跑
 ```
 
 前端：
@@ -31,7 +32,7 @@ make run                   # 启动后端，监听 :8080
 ```bash
 cd frontend
 pnpm install
-pnpm dev                   # → http://localhost:5173
+pnpm dev                   # → http://localhost:5173（dev server 把 /api 反代到 :8081）
 ```
 
 如果跨域被拦，把 `http://localhost:5173` 加入后端 `AILENS360_API_CORS_ORIGINS`（逗号分隔）。
@@ -40,10 +41,13 @@ pnpm dev                   # → http://localhost:5173
 
 完整说明见 [`project-structure.md`](./project-structure.md)。常用入口：
 
-- `cmd/ailens360/main.go` —— 程序入口，仅 CLI / signal 处理
-- `internal/app/app.go` —— 组件装配（手写 DI）
-- `internal/proxy/handler.go` —— 反向代理核心 + REDACT
+- `cmd/ailens360/main.go` —— 程序入口，子命令分发（proxy / collector / api）
+- `internal/app/{proxy,collector,api,common}.go` —— 每个 role 一个 Build 函数（手写 DI）
+- `internal/proxy/handler.go` —— 反向代理核心 + body 上传 + Stream sink + REDACT
 - `internal/proxy/stream/*` —— SSE 解析器（openai / anthropic / gemini）
+- `internal/collector/{consumer,pipeline}.go` —— XREADGROUP 主循环 + Event→Trace 转换
+- `internal/bodystore/store.go` —— S3/MinIO 客户端封装
+- `internal/partition/maintainer.go` —— PG 月度分区维护 goroutine
 - `internal/api/router.go` —— REST 路由总表
 - `internal/storage/postgres/migrations/` —— 所有 DB 迁移
 - `frontend/src/pages/` —— 前端页面

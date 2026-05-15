@@ -6,7 +6,7 @@
 // Usage: <ChatViewer raw={t.RequestBody} mode="request" /> or mode="response".
 
 import { useState } from 'react';
-import { prettyJSON } from '../lib/fmt';
+import { copyToClipboard, prettyJSON } from '../lib/fmt';
 import { useT } from '../i18n';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool' | 'developer' | 'function';
@@ -123,7 +123,56 @@ export default function ChatViewer({ raw, mode }: Props) {
           {messages.map((m, i) => <MessageBubble key={i} m={m} />)}
         </div>
       ) : (
-        <pre className="codeblock">{prettyJSON(raw)}</pre>
+        <RawBlock raw={raw} />
+      )}
+    </div>
+  );
+}
+
+// Raw view of the body with a copy button. Copies the ORIGINAL bytes (not
+// the prettified display) so the user can paste straight into curl or another
+// client to replay the call.
+function RawBlock({ raw }: { raw: string | null | undefined }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const canCopy = !!raw && raw.length > 0;
+  const onCopy = () => {
+    if (!canCopy) return;
+    copyToClipboard(raw!);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <div className="relative">
+      <pre className="codeblock">{prettyJSON(raw)}</pre>
+      {canCopy && (
+        <button
+          type="button"
+          onClick={onCopy}
+          title={copied ? t('common.copied') : t('common.copy')}
+          aria-label={t('common.copy')}
+          className={
+            'absolute top-2 right-2 inline-flex items-center gap-1 ' +
+            'px-2 py-1 rounded-md text-[11px] font-medium ' +
+            'bg-white/10 hover:bg-white/20 text-white/85 hover:text-white ' +
+            'border border-white/15 backdrop-blur-sm transition'
+          }
+        >
+          {copied ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+                 className="text-emerald-300">
+              <path d="M5 13l4 4L19 7"/>
+            </svg>
+          ) : (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2"/>
+              <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+            </svg>
+          )}
+          <span>{copied ? t('common.copied') : t('common.copy')}</span>
+        </button>
       )}
     </div>
   );

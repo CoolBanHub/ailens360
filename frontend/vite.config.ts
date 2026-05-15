@@ -2,9 +2,9 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
-// Vite outputs the built SPA into the Go embed directory so the binary picks
-// up the new bundle on next build. The dev server proxies /api/* and /p/* to
-// the Go backend running on :8080.
+// Vite outputs the built SPA into the Go embed directory so the api binary
+// picks up the new bundle on next build. The dev server proxies /api/* to the
+// api process on :8081 (not the proxy process on :8080).
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -13,8 +13,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
-      '/healthz': 'http://127.0.0.1:8080',
+      '/api': 'http://127.0.0.1:8081',
+      '/healthz': 'http://127.0.0.1:8081',
     },
   },
   build: {

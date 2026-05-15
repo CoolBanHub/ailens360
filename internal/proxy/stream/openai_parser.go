@@ -13,7 +13,7 @@ import (
 // OpenAIParser parses OpenAI-compatible streaming responses (`data: {...}\n\n` + `data: [DONE]`).
 type OpenAIParser struct {
 	// All fields are mutated only from the goroutine that calls Feed.
-	chunks          []ChunkRecord
+	chunkCount      int
 	textBuilder     strings.Builder
 	totalIn         int
 	totalOut        int
@@ -37,11 +37,10 @@ func (p *OpenAIParser) Feed(r io.Reader, tl *Timeline, onFirstToken func(time.Ti
 			now := time.Now()
 			tl.AppendChunk(now)
 			payload := bytes.TrimSpace(ev.Data)
-			if bytes.Equal(payload, []byte("[DONE]")) {
-				// no more
-			} else {
-				p.handleChunk(payload, ev.Raw, len(p.chunks), now, onFirstToken, tl)
+			if !bytes.Equal(payload, []byte("[DONE]")) {
+				p.handleChunk(payload, now, onFirstToken, tl)
 			}
+			p.chunkCount++
 		}
 		if err != nil {
 			return
@@ -98,11 +97,10 @@ func (u *openaiUsage) reasoningTokens() int {
 	return 0
 }
 
-func (p *OpenAIParser) handleChunk(data, raw []byte, seq int, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
+func (p *OpenAIParser) handleChunk(data []byte, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
 	var c openaiChunk
 	if err := json.Unmarshal(data, &c); err != nil {
-		// keep going; record raw only
-		p.chunks = append(p.chunks, ChunkRecord{Seq: seq, Ts: now.UnixMilli(), Raw: capRaw(raw)})
+		// keep going; the chunk count was already bumped by the caller.
 		return
 	}
 	if c.Model != "" && p.model == "" {
@@ -144,20 +142,6 @@ func (p *OpenAIParser) handleChunk(data, raw []byte, seq int, now time.Time, onF
 		p.reasoningToks = c.Usage.reasoningTokens()
 		p.tokensFromUsage = true
 	}
-	p.chunks = append(p.chunks, ChunkRecord{
-		Seq:       seq,
-		Ts:        now.UnixMilli(),
-		DeltaText: delta,
-		Raw:       capRaw(raw),
-	})
-}
-
-func capRaw(raw []byte) string {
-	const cap = 2 << 10 // 2 KB per chunk
-	if len(raw) > cap {
-		return string(raw[:cap]) + "...(truncated)"
-	}
-	return string(raw)
 }
 
 // Finalize collects the parsing result into the given Event.
@@ -170,8 +154,7 @@ func capRaw(raw []byte) string {
 // upstream.
 func (p *OpenAIParser) Finalize(ev *Event) {
 	ev.ResponseText = p.textBuilder.String()
-	ev.StreamChunks = p.chunks
-	ev.ChunkCount = len(p.chunks)
+	ev.ChunkCount = p.chunkCount
 	ev.FinishReason = p.finishReason
 	if p.tokensFromUsage {
 		ev.InputTokens = max(p.totalIn-p.cachedInToks, 0)

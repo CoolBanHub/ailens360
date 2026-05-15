@@ -23,24 +23,28 @@ type Project struct {
 // logical trace. Multiple Trace rows that share the same TraceID belong to
 // one logical run (e.g. all model calls inside a single agent.Generate).
 type Trace struct {
-	ID                       string // span id (one HTTP round-trip)
-	TraceID                  string // groups spans of the same logical run (X-AILens-Trace-Id)
-	TraceName                string // human label of the logical trace (X-AILens-Trace-Name)
-	ProjectID                string
-	UserID                   string // X-AILens-User on the inbound request
-	SessionID                string // X-AILens-Session
-	Tags                     string // X-AILens-Tag, comma-separated
-	Model                    string
-	IsStream                 bool
-	Status                   string // success | error | aborted
-	StatusCode               int
-	ErrorMessage             string
-	RequestHeaders           string // JSON
-	RequestBody              string // truncated JSON
-	RequestPath              string // path after /p/{code}/, with leading slash
-	ResponseHeaders          string // JSON
-	ResponseBody             string // truncated; for streams: joined deltas or final JSON
-	StreamChunks             string // JSON array of chunks (capped)
+	ID              string // span id (one HTTP round-trip)
+	TraceID         string // groups spans of the same logical run (X-AILens-Trace-Id)
+	TraceName       string // human label of the logical trace (X-AILens-Trace-Name)
+	ProjectID       string
+	UserID          string // X-AILens-User on the inbound request
+	SessionID       string // X-AILens-Session
+	Tags            string // X-AILens-Tag, comma-separated
+	Model           string
+	IsStream        bool
+	Status          string // success | error | aborted
+	StatusCode      int
+	ErrorMessage    string
+	RequestHeaders  string // JSON
+	RequestPath     string // upstream URL (absolute, including scheme)
+	ResponseHeaders string // JSON
+	// Body keys point to objects in the configured body store. Empty means the
+	// upload failed or was skipped; UI shows a "body unavailable" placeholder.
+	// Size is the uncompressed byte count of what was uploaded.
+	RequestBodyKey           string
+	ResponseBodyKey          string
+	RequestBodySize          int64
+	ResponseBodySize         int64
 	Timeline                 string // JSON array of {event,ts}
 	InputTokens              int
 	OutputTokens             int

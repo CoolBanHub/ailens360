@@ -1,10 +1,15 @@
+// Package collector consumes proxy events off a Redis Stream, decorates them
+// (token counts, pricing, derived latencies) and batches them into Postgres.
+// It also feeds the realtime Redis metrics dashboard.
+//
+// The hot path is fully decoupled from the proxy: even if Postgres is slow or
+// Redis is degraded, the proxy keeps serving — events queue up in the stream.
 package collector
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
-	"sync"
+	"os"
 	"time"
 
 	"github.com/CoolBanHub/ailens360/internal/metrics"
@@ -14,133 +19,25 @@ import (
 	"github.com/CoolBanHub/ailens360/internal/tokenizer"
 )
 
-type Config struct {
-	BufferSize    int
-	BatchSize     int
-	FlushInterval time.Duration
+// Transformer converts a proxy stream.Event into a repo.Trace by computing
+// derived fields (token estimates for outputs only, cost, latencies, TPS).
+//
+// Note: input-token estimation was dropped in the body-store refactor because
+// request bytes no longer travel through the IPC stream. Modern upstream
+// providers report usage for both prompt and completion tokens in their final
+// SSE event, so the fallback path was rarely exercised; the value of keeping
+// stream messages small outweighed it.
+type Transformer struct {
+	logger  *slog.Logger
+	pricing *pricing.Catalog
+	tok     tokenizer.Estimator
 }
 
-// Pipeline ingests proxy events, computes derived metrics, and persists them in batches.
-type Pipeline struct {
-	cfg      Config
-	logger   *slog.Logger
-	traces   repo.TraceRepo
-	pricing  *pricing.Catalog
-	tok      tokenizer.Estimator
-	realtime *metrics.Realtime
-
-	ch     chan *stream.Event
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-	once   sync.Once
+func NewTransformer(logger *slog.Logger, p *pricing.Catalog, tok tokenizer.Estimator) *Transformer {
+	return &Transformer{logger: logger, pricing: p, tok: tok}
 }
 
-func New(cfg Config, logger *slog.Logger, traces repo.TraceRepo, p *pricing.Catalog, tok tokenizer.Estimator, rt *metrics.Realtime) *Pipeline {
-	if cfg.BufferSize <= 0 {
-		cfg.BufferSize = 10000
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = 200
-	}
-	if cfg.FlushInterval <= 0 {
-		cfg.FlushInterval = time.Second
-	}
-	return &Pipeline{
-		cfg:      cfg,
-		logger:   logger,
-		traces:   traces,
-		pricing:  p,
-		tok:      tok,
-		realtime: rt,
-		ch:       make(chan *stream.Event, cfg.BufferSize),
-	}
-}
-
-func (p *Pipeline) Start(parent context.Context) {
-	ctx, cancel := context.WithCancel(parent)
-	p.cancel = cancel
-	p.wg.Add(1)
-	go p.run(ctx)
-}
-
-func (p *Pipeline) Stop() {
-	p.once.Do(func() {
-		close(p.ch)
-	})
-	p.wg.Wait()
-	if p.cancel != nil {
-		p.cancel()
-	}
-}
-
-// Submit implements proxy.EventSink. Drops events if the buffer is full to avoid blocking the proxy hot path.
-func (p *Pipeline) Submit(ev *stream.Event) {
-	select {
-	case p.ch <- ev:
-	default:
-		p.logger.Warn("collector buffer full, dropping event", "trace_id", ev.TraceID)
-	}
-}
-
-func (p *Pipeline) run(ctx context.Context) {
-	defer p.wg.Done()
-	tick := time.NewTicker(p.cfg.FlushInterval)
-	defer tick.Stop()
-	batch := make([]*repo.Trace, 0, p.cfg.BatchSize)
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		flushCtx := ctx
-		cancel := func() {}
-		if ctx.Err() != nil {
-			flushCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-		}
-		err := p.traces.BatchCreate(flushCtx, batch)
-		cancel()
-		if err != nil {
-			p.logger.Error("trace batch insert failed", "err", err, "n", len(batch))
-			batch = batch[:0]
-			return
-		}
-		if p.realtime != nil {
-			samples := make([]metrics.Sample, 0, len(batch))
-			for _, t := range batch {
-				samples = append(samples, metrics.Sample{
-					ProjectID:  t.ProjectID,
-					Tokens:     t.TotalTokens,
-					CostMicros: int64(t.CostUSD * 1_000_000),
-				})
-			}
-			metricsCtx := flushCtx
-			if metricsCtx.Err() != nil {
-				metricsCtx = context.Background()
-			}
-			p.realtime.RecordBatch(metricsCtx, samples)
-		}
-		batch = batch[:0]
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			flush()
-			return
-		case ev, ok := <-p.ch:
-			if !ok {
-				flush()
-				return
-			}
-			batch = append(batch, p.transform(ev))
-			if len(batch) >= p.cfg.BatchSize {
-				flush()
-			}
-		case <-tick.C:
-			flush()
-		}
-	}
-}
-
-func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
+func (t *Transformer) Transform(ev *stream.Event) *repo.Trace {
 	tl := ev.Timeline
 	latencyMs := int64(0)
 	if !tl.ResponseOut.IsZero() && !tl.RequestIn.IsZero() {
@@ -161,17 +58,13 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 	}
 
 	if ev.OutputTokens == 0 && ev.ResponseText != "" {
-		ev.OutputTokens = p.tok.Count(ev.Model, ev.ResponseText)
-		ev.TokensEstimated = true
-	}
-	if ev.InputTokens == 0 && len(ev.RequestBody) > 0 {
-		ev.InputTokens = p.tok.Count(ev.Model, string(ev.RequestBody))
+		ev.OutputTokens = t.tok.Count(ev.Model, ev.ResponseText)
 		ev.TokensEstimated = true
 	}
 	if ev.TotalTokens == 0 {
 		ev.TotalTokens = ev.InputTokens + ev.OutputTokens
 	}
-	cost := p.pricing.Cost(ev.Model, pricing.TokenUsage{
+	cost := t.pricing.Cost(ev.Model, pricing.TokenUsage{
 		Input:         ev.InputTokens,
 		Output:        ev.OutputTokens,
 		CachedInput:   ev.CachedInputTokens,
@@ -187,43 +80,31 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 	reqHdr, _ := json.Marshal(ev.RequestHeaders)
 	respHdr, _ := json.Marshal(ev.ResponseHeaders)
 
-	// Prefer the raw captured body — for streams that's the original SSE
-	// frames (the UI's pretty view reassembles them; the raw view shows them
-	// verbatim), for non-stream it's the upstream JSON. Fall back to the
-	// parser-joined ResponseText only when no raw bytes were captured
-	// (unrecognized provider, etc). Token estimation later still uses
-	// ResponseText, which stays as plain text.
-	respBody := string(ev.ResponseBody)
-	if respBody == "" {
-		respBody = ev.ResponseText
-	}
-
 	logicTraceID := ev.LogicTraceID
 	if logicTraceID == "" {
 		logicTraceID = ev.TraceID
 	}
 
-	t := &repo.Trace{
-		ID:              ev.TraceID,
-		TraceID:         logicTraceID,
-		TraceName:       ev.TraceName,
-		ProjectID:       ev.ProjectID,
-		UserID:          ev.UserID,
-		SessionID:       ev.SessionID,
-		Tags:            ev.Tags,
-		Model:           ev.Model,
-		IsStream:        ev.IsStream,
-		Status:          ev.Status,
-		StatusCode:      ev.StatusCode,
-		ErrorMessage:    ev.ErrorMsg,
-		RequestHeaders:  string(reqHdr),
-		RequestBody:     string(ev.RequestBody),
-		RequestPath:     ev.RequestPath,
-		ResponseHeaders: string(respHdr),
-		ResponseBody:    respBody,
-		// Per-chunk SSE records used to be persisted here for a "stream
-		// chunks" debug view that nobody used; ChunkCount above is enough.
-		StreamChunks:             "",
+	tr := &repo.Trace{
+		ID:                       ev.TraceID,
+		TraceID:                  logicTraceID,
+		TraceName:                ev.TraceName,
+		ProjectID:                ev.ProjectID,
+		UserID:                   ev.UserID,
+		SessionID:                ev.SessionID,
+		Tags:                     ev.Tags,
+		Model:                    ev.Model,
+		IsStream:                 ev.IsStream,
+		Status:                   ev.Status,
+		StatusCode:               ev.StatusCode,
+		ErrorMessage:             ev.ErrorMsg,
+		RequestHeaders:           string(reqHdr),
+		RequestPath:              ev.RequestPath,
+		ResponseHeaders:          string(respHdr),
+		RequestBodyKey:           ev.RequestBodyKey,
+		ResponseBodyKey:          ev.ResponseBodyKey,
+		RequestBodySize:          ev.RequestBodySize,
+		ResponseBodySize:         ev.ResponseBodySize,
 		Timeline:                 string(timelineJSON),
 		InputTokens:              ev.InputTokens,
 		OutputTokens:             ev.OutputTokens,
@@ -244,10 +125,10 @@ func (p *Pipeline) transform(ev *stream.Event) *repo.Trace {
 		StreamStatus:             ev.StreamStatus,
 		CreatedAt:                tl.RequestIn,
 	}
-	if t.CreatedAt.IsZero() {
-		t.CreatedAt = time.Now()
+	if tr.CreatedAt.IsZero() {
+		tr.CreatedAt = time.Now()
 	}
-	return t
+	return tr
 }
 
 type timelineEntry struct {
@@ -270,4 +151,28 @@ func buildTimelineEntries(tl stream.Timeline) []timelineEntry {
 	add("upstream_done", tl.UpstreamDone)
 	add("response_out", tl.ResponseOut)
 	return out
+}
+
+// realtimeSamples builds the rolling metrics samples written alongside every
+// PG flush. Realtime metrics live in Redis with 1s buckets — see internal/metrics.
+func realtimeSamples(batch []*repo.Trace) []metrics.Sample {
+	out := make([]metrics.Sample, 0, len(batch))
+	for _, t := range batch {
+		out = append(out, metrics.Sample{
+			ProjectID:  t.ProjectID,
+			Tokens:     t.TotalTokens,
+			CostMicros: int64(t.CostUSD * 1_000_000),
+		})
+	}
+	return out
+}
+
+// hostnameOnce returns a stable hostname suffix for consumer names; falls back
+// to "unknown" only if os.Hostname errors, which should never happen.
+func hostnameOnce() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "unknown"
+	}
+	return h
 }

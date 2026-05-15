@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/version.Version=$(VER) \
            -X $(PKG)/internal/version.Commit=$(GIT_SHA) \
            -X $(PKG)/internal/version.BuildTime=$(DATE)
 
-.PHONY: dev build run test lint tidy clean keygen docker docker-up docker-down
+.PHONY: dev build run run-proxy run-collector run-api test lint tidy clean docker docker-up docker-down
 
 dev: run
 
@@ -17,11 +17,24 @@ build:
 	@mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BIN) ./cmd/ailens360
 
+# `make run` brings up all three processes in the background using a single
+# subshell, so SIGINT/SIGTERM tears them all down together. Logs are interleaved
+# to the terminal — for richer multi-pane logs use tmux or a process manager.
 run:
-	go run ./cmd/ailens360 server
+	@trap 'kill 0' INT TERM EXIT; \
+	  ( go run ./cmd/ailens360 collector & \
+	    go run ./cmd/ailens360 api & \
+	    go run ./cmd/ailens360 proxy & \
+	    wait )
 
-keygen:
-	go run ./cmd/ailens360 keygen
+run-proxy:
+	go run ./cmd/ailens360 proxy
+
+run-collector:
+	go run ./cmd/ailens360 collector
+
+run-api:
+	go run ./cmd/ailens360 api
 
 test:
 	go test ./...

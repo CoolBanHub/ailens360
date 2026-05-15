@@ -1,5 +1,26 @@
-# 一键启动 ailens360 全栈：应用（从源码构建） + Postgres + Redis。
-# 适合自部署到一台服务器直接跑起来。
+# 一键启动 ailens360 全栈：
+#   - 三个应用进程（proxy / collector / api，共享同一个镜像）
+#   - Postgres + Redis（IPC + 元数据）
+#   - MinIO（对象存储，存请求 / 响应正文）
+#
+# 客户端只暴露：
+#   - proxy   :8080  → LLM 流量入口
+#   - api     :8081  → 控制台 + REST + 静态 UI
+#   - minio   :9000  → 浏览器拉 presigned URL 直取正文
+#   - minio   :9001  → MinIO console（管理用，可关）
+# collector 没有对外端口，仅 :8082 健康检查，绑在内部网络。
+x-app-env: &app-env
+  AILENS360_DB_DSN: postgres://ailens:ailens@postgres:5432/ailens360?sslmode=disable
+  AILENS360_REDIS_ADDR: redis:6379
+  AILENS360_BODY_STORE_ENDPOINT: minio:9000
+  AILENS360_BODY_STORE_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AILENS360_BODY_STORE_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  AILENS360_BODY_STORE_USE_SSL: "false"
+  AILENS360_BODY_STORE_PATH_STYLE: "true"
+  # PublicEndpoint：浏览器从外部访问 MinIO 走的地址。compose 内部走 minio:9000，
+  # 外部浏览器走 localhost:9000（部署到服务器时改为对外域名）。
+  AILENS360_BODY_STORE_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -30,8 +51,29 @@ services:
       timeout: 3s
       retries: 10
 
-  ailens360:
-    build:
+  minio:
+    image: minio/minio:latest
+    container_name: ailens-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ailens-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Collector owns schema migrations and partition maintenance, so api / proxy
+  # depend on it being healthy before they bind.
+  collector:
+    build: &build-app
       context: .
       dockerfile: deploy/docker/Dockerfile
       args:
@@ -42,25 +84,57 @@ services:
         ALL_PROXY: ${ALL_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
     image: ailens360/ailens360:latest
-    container_name: ailens360
+    container_name: ailens360-collector
+    command: ["collector"]
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      minio:    { condition: service_healthy }
+    environment:
+      <<: *app-env
+      AILENS360_COLLECTOR_HEALTH_ADDR: 0.0.0.0:8082
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  proxy:
+    build: *build-app
+    image: ailens360/ailens360:latest
+    container_name: ailens360-proxy
+    command: ["proxy"]
+    restart: unless-stopped
+    depends_on:
+      collector: { condition: service_healthy }
     ports:
       - "8080:8080"
     environment:
+      <<: *app-env
       AILENS360_PROXY_ADDR: 0.0.0.0:8080
-      AILENS360_API_ADDR: 0.0.0.0:8080
-      AILENS360_DB_DSN: postgres://ailens:ailens@postgres:5432/ailens360?sslmode=disable
-      AILENS360_REDIS_ADDR: redis:6379
+      AILENS360_PROXY_PUBLIC_URL: ${AILENS360_PROXY_PUBLIC_URL:-}
+
+  api:
+    build: *build-app
+    image: ailens360/ailens360:latest
+    container_name: ailens360-api
+    command: ["api"]
+    restart: unless-stopped
+    depends_on:
+      collector: { condition: service_healthy }
+    ports:
+      - "8081:8081"
+    environment:
+      <<: *app-env
+      AILENS360_API_ADDR: 0.0.0.0:8081
+      AILENS360_PROXY_PUBLIC_URL: ${AILENS360_PROXY_PUBLIC_URL:-}
       AILENS360_AUTH_USERNAME: ${AILENS360_AUTH_USERNAME:-admin}
       AILENS360_AUTH_PASSWORD: ${AILENS360_AUTH_PASSWORD:-admin}
-      # 必填：openssl rand -hex 32 生成后写到 .env
+      # Required: openssl rand -hex 32
       AILENS360_JWT_SECRET: ${AILENS360_JWT_SECRET:?set AILENS360_JWT_SECRET in .env (openssl rand -hex 32)}
 
 volumes:
   ailens-pg:
   ailens-redis:
+  ailens-minio:

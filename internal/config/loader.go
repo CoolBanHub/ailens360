@@ -33,8 +33,17 @@ func Load(envFile string) (*Config, error) {
 }
 
 func applyEnv(c *Config) error {
+	// Shared
+	setString(&c.PublicURL, "AILENS360_PUBLIC_URL")
+	c.PublicURL = strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
+	if c.PublicURL != "" &&
+		!strings.HasPrefix(c.PublicURL, "http://") &&
+		!strings.HasPrefix(c.PublicURL, "https://") {
+		return fmt.Errorf("AILENS360_PUBLIC_URL: must start with http:// or https://")
+	}
+
 	// Proxy
-	setString(&c.Proxy.Addr, "AILENS360_PROXY_ADDR", "AILENS360_ADDR")
+	setString(&c.Proxy.Addr, "AILENS360_PROXY_ADDR")
 	if err := setDuration(&c.Proxy.ReadTimeout, "AILENS360_PROXY_READ_TIMEOUT"); err != nil {
 		return err
 	}
@@ -50,6 +59,9 @@ func applyEnv(c *Config) error {
 	if err := setDuration(&c.Proxy.UpstreamTimeout, "AILENS360_PROXY_UPSTREAM_TIMEOUT"); err != nil {
 		return err
 	}
+	if err := setInt(&c.Proxy.RawBodyLimit, "AILENS360_PROXY_RAW_BODY_LIMIT"); err != nil {
+		return err
+	}
 	setString(&c.Proxy.PublicURL, "AILENS360_PROXY_PUBLIC_URL")
 	c.Proxy.PublicURL = strings.TrimRight(strings.TrimSpace(c.Proxy.PublicURL), "/")
 	if c.Proxy.PublicURL != "" &&
@@ -59,7 +71,7 @@ func applyEnv(c *Config) error {
 	}
 
 	// API
-	setString(&c.API.Addr, "AILENS360_API_ADDR", "AILENS360_ADDR")
+	setString(&c.API.Addr, "AILENS360_API_ADDR")
 	if v := os.Getenv("AILENS360_API_CORS_ORIGINS"); v != "" {
 		parts := strings.Split(v, ",")
 		out := parts[:0]
@@ -112,18 +124,7 @@ func applyEnv(c *Config) error {
 	setString(&c.Log.Format, "AILENS360_LOG_FORMAT")
 
 	// Collector
-	if err := setInt(&c.Collector.BufferSize, "AILENS360_COLLECTOR_BUFFER_SIZE"); err != nil {
-		return err
-	}
-	if err := setInt(&c.Collector.BatchSize, "AILENS360_COLLECTOR_BATCH_SIZE"); err != nil {
-		return err
-	}
-	if err := setDuration(&c.Collector.FlushInterval, "AILENS360_COLLECTOR_FLUSH_INTERVAL"); err != nil {
-		return err
-	}
-	if err := setInt(&c.Collector.RawBodyLimit, "AILENS360_COLLECTOR_RAW_BODY_LIMIT"); err != nil {
-		return err
-	}
+	setString(&c.Collector.HealthAddr, "AILENS360_COLLECTOR_HEALTH_ADDR")
 
 	// Auth
 	setString(&c.Auth.Username, "AILENS360_AUTH_USERNAME")
@@ -139,6 +140,62 @@ func applyEnv(c *Config) error {
 		return err
 	}
 	if err := setBool(&c.Pricing.Disable, "AILENS360_PRICING_DISABLE"); err != nil {
+		return err
+	}
+
+	// BodyStore
+	setString(&c.BodyStore.Endpoint, "AILENS360_BODY_STORE_ENDPOINT")
+	setString(&c.BodyStore.Bucket, "AILENS360_BODY_STORE_BUCKET")
+	setString(&c.BodyStore.Region, "AILENS360_BODY_STORE_REGION")
+	setString(&c.BodyStore.AccessKeyID, "AILENS360_BODY_STORE_ACCESS_KEY_ID")
+	setString(&c.BodyStore.SecretAccessKey, "AILENS360_BODY_STORE_SECRET_ACCESS_KEY")
+	if err := setBool(&c.BodyStore.UseSSL, "AILENS360_BODY_STORE_USE_SSL"); err != nil {
+		return err
+	}
+	if err := setBool(&c.BodyStore.PathStyle, "AILENS360_BODY_STORE_PATH_STYLE"); err != nil {
+		return err
+	}
+	if err := setInt64(&c.BodyStore.PartSize, "AILENS360_BODY_STORE_PART_SIZE"); err != nil {
+		return err
+	}
+	if err := setBool(&c.BodyStore.GzipBodies, "AILENS360_BODY_STORE_GZIP_BODIES"); err != nil {
+		return err
+	}
+	if err := setDuration(&c.BodyStore.UploadTimeout, "AILENS360_BODY_STORE_UPLOAD_TIMEOUT"); err != nil {
+		return err
+	}
+	if err := setBool(&c.BodyStore.PresignRedirect, "AILENS360_BODY_STORE_PRESIGN_REDIRECT"); err != nil {
+		return err
+	}
+	if err := setDuration(&c.BodyStore.PresignTTL, "AILENS360_BODY_STORE_PRESIGN_TTL"); err != nil {
+		return err
+	}
+	setString(&c.BodyStore.PublicEndpoint, "AILENS360_BODY_STORE_PUBLIC_ENDPOINT")
+
+	// Stream
+	setString(&c.Stream.Key, "AILENS360_STREAM_KEY")
+	setString(&c.Stream.ConsumerGroup, "AILENS360_STREAM_CONSUMER_GROUP")
+	if err := setDuration(&c.Stream.BlockTimeout, "AILENS360_STREAM_BLOCK_TIMEOUT"); err != nil {
+		return err
+	}
+	if err := setInt(&c.Stream.BatchSize, "AILENS360_STREAM_BATCH_SIZE"); err != nil {
+		return err
+	}
+	if err := setDuration(&c.Stream.PendingIdleMax, "AILENS360_STREAM_PENDING_IDLE_MAX"); err != nil {
+		return err
+	}
+	if err := setDuration(&c.Stream.ClaimInterval, "AILENS360_STREAM_CLAIM_INTERVAL"); err != nil {
+		return err
+	}
+
+	// Partition
+	if err := setInt(&c.Partition.PreCreate, "AILENS360_PARTITION_PRE_CREATE"); err != nil {
+		return err
+	}
+	if err := setInt(&c.Partition.RetentionMonths, "AILENS360_PARTITION_RETENTION_MONTHS"); err != nil {
+		return err
+	}
+	if err := setDuration(&c.Partition.CheckInterval, "AILENS360_PARTITION_CHECK_INTERVAL"); err != nil {
 		return err
 	}
 

@@ -16,7 +16,9 @@ type Timeline struct {
 	ChunkTimes         []time.Time
 }
 
-// Event is the normalized stream event consumed by the collector.
+// Event is the normalized trace event produced by the proxy and consumed by
+// the collector. Bodies live in the body store; the event only carries the
+// object key + size so Redis Stream payloads stay small.
 type Event struct {
 	TraceID  string
 	IsStream bool
@@ -52,17 +54,27 @@ type Event struct {
 	CachedInputTokens        int
 	CacheCreationInputTokens int
 
-	ResponseText  string // joined delta text for streams, body for non-stream
+	// ResponseText carries the joined delta text (streams) or extracted
+	// content (non-stream) for fallback token estimation by the collector when
+	// upstream usage is missing. Bound by the proxy's RawBodyLimit.
+	ResponseText  string
 	BytesStreamed int64
 	ChunkCount    int
 
-	// Raw payloads (truncated to RawBodyLimit by caller).
+	// Header maps are JSON-marshaled into the Redis Stream payload by the
+	// proxy sink. Sensitive headers are redacted before this struct is built.
 	RequestHeaders  map[string][]string
-	RequestBody     []byte
-	RequestPath     string // path after /p/{code}/, with leading slash
 	ResponseHeaders map[string][]string
-	ResponseBody    []byte
-	StreamChunks    []ChunkRecord
+
+	RequestPath string // absolute upstream URL including scheme
+
+	// Body store references. Empty key signals "body unavailable" (upload
+	// failed or skipped); size is the uncompressed byte count of what was
+	// streamed past the wire on the proxy.
+	RequestBodyKey   string
+	ResponseBodyKey  string
+	RequestBodySize  int64
+	ResponseBodySize int64
 
 	Timeline Timeline
 
@@ -72,14 +84,6 @@ type Event struct {
 	Tags         string // from X-AILens-Tag (comma-separated)
 	LogicTraceID string // from X-AILens-Trace-Id (groups spans of the same logical run)
 	TraceName    string // from X-AILens-Trace-Name (human label for the logical trace)
-}
-
-type ChunkRecord struct {
-	Seq       int    `json:"seq"`
-	Ts        int64  `json:"ts"` // unix ms
-	DeltaText string `json:"delta_text,omitempty"`
-	DeltaToks int    `json:"delta_tokens,omitempty"`
-	Raw       string `json:"raw,omitempty"`
 }
 
 func (t *Timeline) AppendChunk(ts time.Time) {
