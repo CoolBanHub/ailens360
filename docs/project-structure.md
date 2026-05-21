@@ -173,7 +173,7 @@ ailens360/
 
 新增上游兼容只需：
 
-1. 协议是 OpenAI Chat Completions 兼容（DeepSeek / Groq / Together / Moonshot / 本地 vLLM 等）：**不需要改代码**，客户端写完整 baseURL 即可。
+1. 协议是 OpenAI Chat Completions 兼容（DeepSeek / Grok / Together / Moonshot / 本地 vLLM 等）：**不需要改代码**，客户端写完整 baseURL 即可。
 2. 新协议族：在 `internal/proxy/stream/parser.go` 的 `NewParserForHost` 加 host 规则，并在 `internal/proxy/stream/` 新增解析器。
 
 ### 2.6 trace 表自动分区

@@ -7,7 +7,7 @@
 - Go 1.26+（**无需 CGO**；当前 `go.mod` 声明 `go 1.26.1`）
 - Postgres 14+、Redis 6+、MinIO（或任意 S3 兼容对象存储）—— 都是必备依赖；本地最简方式：`docker compose -f docker-compose.deps.yml up -d`
 - Node.js 20+ 与 pnpm（仅当需要本地跑前端控制台）
-- 任意 LLM 上游 API Key（OpenAI / Anthropic / Gemini / DeepSeek / Groq / 本地 vLLM / Ollama 均可）
+- 任意 LLM 上游 API Key（OpenAI / Anthropic / Gemini / DeepSeek / Grok / 本地 vLLM / Ollama 均可）
 
 ## 一、构建与启动
 
@@ -128,7 +128,7 @@ curl -X POST 'http://localhost:8080/https://api.openai.com/v1/chat/completions' 
   -H 'X-AILens-Project-Key: sk-demo...' \
   -H 'Content-Type: application/json' \
   -d '{
-        "model":"gpt-4o-mini",
+        "model":"gpt-5.5",
         "stream": true,
         "messages":[{"role":"user","content":"hello"}]
       }'
@@ -148,7 +148,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "hello"}],
     stream=True,
 )
@@ -175,8 +175,8 @@ client = anthropic.Anthropic(
 ```python
 # DeepSeek
 base_url="http://localhost:8080/https://api.deepseek.com/v1"
-# Groq
-base_url="http://localhost:8080/https://api.groq.com/openai/v1"
+# Grok
+base_url="http://localhost:8080/https://api.x.ai/v1"
 # 本地 Ollama
 base_url="http://localhost:8080/http://localhost:11434/v1"
 ```

@@ -237,10 +237,9 @@ func (c *Catalog) lookup(model string) (PricePerMTok, bool) {
 // environments without network access still get plausible costs.
 func seedPrices() map[string]PricePerMTok {
 	return map[string]PricePerMTok{
+		"gpt-5":             {Input: 2.50, Output: 10.00},
 		"gpt-4o":            {Input: 2.50, Output: 10.00},
 		"gpt-4o-mini":       {Input: 0.15, Output: 0.60},
-		"gpt-4-turbo":       {Input: 10.00, Output: 30.00},
-		"gpt-3.5-turbo":     {Input: 0.50, Output: 1.50},
 		"claude-3-5-sonnet": {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
 		"claude-3-5-haiku":  {Input: 0.80, Output: 4.00, CacheRead: 0.08, CacheWrite: 1.00},
 		"claude-3-opus":     {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},

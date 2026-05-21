@@ -183,7 +183,7 @@ client = OpenAI(
     default_headers={"X-AILens-Project-Key": "${p.project_key}"},
 )
 resp = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "hi"}],
 )`}
           />
@@ -198,7 +198,7 @@ const client = new OpenAI({
 });
 
 await client.chat.completions.create({
-  model: 'gpt-4o-mini',
+  model: 'gpt-5.5',
   messages: [{ role: 'user', content: 'hi' }],
 });`}
           />
@@ -229,7 +229,7 @@ func (t *kHeader) RoundTrip(r *http.Request) (*http.Response, error) {
 
 cm, _ := openai.NewChatModel(ctx, &openai.ChatModelConfig{
     APIKey:     "sk-real-key",
-    Model:      "gpt-4o-mini",
+    Model:      "gpt-5.5",
     BaseURL:    "${p.example.openai}",
     HTTPClient: &http.Client{Transport: &kHeader{key: "${p.project_key}"}},
 })`}

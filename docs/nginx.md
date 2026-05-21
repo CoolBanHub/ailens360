@@ -306,7 +306,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "hi"}],
     stream=True,
 )
@@ -314,7 +314,7 @@ for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
-接 DeepSeek / Groq / Anthropic / Ollama 时仅替换 base_url 末尾的上游 URL 段（详见 [`getting-started.md`](./getting-started.md)）。
+接 DeepSeek / Grok / Anthropic / Ollama 时仅替换 base_url 末尾的上游 URL 段（详见 [`getting-started.md`](./getting-started.md)）。
 
 ## 八、故障排查
 

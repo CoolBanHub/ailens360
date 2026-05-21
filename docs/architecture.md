@@ -95,7 +95,7 @@
 - **URL-embedded upstream 路由**：代理流量形如 `/<scheme>://<完整上游 URL>` 或 `/<sk-...>/<scheme>://<完整上游 URL>`
   - 例：`/https://api.openai.com/v1/chat/completions`
   - 上游 URL 由**客户端在 baseURL 里直接指定**；AILens360 不持有任何 per-project 上游配置
-  - 任何 OpenAI 兼容服务（DeepSeek / Groq / Together / Moonshot / 本地 vLLM / Ollama）都能直接接入
+  - 任何 OpenAI 兼容服务（DeepSeek / Grok / Together / Moonshot / 本地 vLLM / Ollama）都能直接接入
 - **手动路径解析（chi catch-all）**：因为内嵌 URL 含 `://` 这种结构，chi 路由的 `{var}` 捕获会把路径段里的连续 `/` 折叠 / 归一化，导致 scheme 信息丢失。代理因此使用 `/*` 通配挂载（更具体的 `/healthz` 先匹配），再在 `parseProxyPath` 中**手动解析 `r.URL.Path`**（Go 的 `net/http` 会在 `r.URL.Path` 上保留原始的 `//`），剥掉前导 `/` 后校验 `http://` / `https://` 前缀即可。实现见 `internal/proxy/handler.go`。
 - **Project 解析**：
   - 项目身份支持 `X-AILens-Project-Key`、`/<sk-...>/` 路径前缀、`?sk=<sk-...>` 查询参数；缺失密钥返回 401 `missing_project_key`
@@ -637,13 +637,13 @@ PK `(id, created_at)` 自动是分区索引；`GetByID(id)` 不带 `created_at` 
 
 #### 为什么把上游 URL 直接拼到路径里？
 
-早期版本通过请求路径"自动识别 provider"，并把每种 provider 硬编码到一个官方 baseURL，结果**把 AILens360 锁死在了 3 个官方上游**：DeepSeek、Groq、Together、Moonshot、SiliconFlow、本地 vLLM / Ollama 全部进不来。
+早期版本通过请求路径"自动识别 provider"，并把每种 provider 硬编码到一个官方 baseURL，结果**把 AILens360 锁死在了 3 个官方上游**：DeepSeek、Grok、Together、Moonshot、SiliconFlow、本地 vLLM / Ollama 全部进不来。
 
 把**完整上游 URL 直接拼到代理路径**之后，"上游是谁"完全交还给客户端：
 
 ```
 http://localhost:8080/https://api.deepseek.com/v1
-http://localhost:8080/https://api.groq.com/openai/v1
+http://localhost:8080/https://api.x.ai/openai/v1
 http://localhost:8080/http://localhost:11434/v1            # Ollama
 http://localhost:8080/https://api.anthropic.com
 ```

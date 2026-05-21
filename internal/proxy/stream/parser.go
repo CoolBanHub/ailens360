@@ -22,7 +22,7 @@ type Parser interface {
 }
 
 // NewParserForHost returns the right Parser for an upstream host. Only the SSE
-// wire format matters here — DeepSeek, Groq, Together, Moonshot and local vLLM
+// wire format matters here — DeepSeek, Grok, Together, Moonshot and local vLLM
 // all speak OpenAI's Chat Completions SSE, so the default branch covers them.
 func NewParserForHost(host string) Parser {
 	h := strings.ToLower(host)

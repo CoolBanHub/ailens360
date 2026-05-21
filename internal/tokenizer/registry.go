@@ -60,7 +60,8 @@ func encodingForModel(model string) string {
 	}
 	m := strings.ToLower(model)
 	switch {
-	case strings.HasPrefix(m, "gpt-4o"),
+	case strings.HasPrefix(m, "gpt-5"),
+		strings.HasPrefix(m, "gpt-4o"),
 		strings.HasPrefix(m, "gpt-4.1"),
 		strings.HasPrefix(m, "gpt-4.5"),
 		strings.HasPrefix(m, "o1"),
@@ -68,7 +69,6 @@ func encodingForModel(model string) string {
 		strings.HasPrefix(m, "o4"):
 		return "o200k_base"
 	case strings.HasPrefix(m, "gpt-4"),
-		strings.HasPrefix(m, "gpt-3.5"),
 		strings.HasPrefix(m, "text-embedding-3"),
 		strings.HasPrefix(m, "text-embedding-ada-002"):
 		return "cl100k_base"
