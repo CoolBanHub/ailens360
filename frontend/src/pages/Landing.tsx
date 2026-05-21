@@ -194,7 +194,7 @@ const client = new OpenAI({
   baseURL: "https://ailens.your.co/`}<span style={{ color: '#a5f3fc' }}>{`https://api.openai.com/v1`}</span>{`",
   apiKey:  process.env.OPENAI_API_KEY,
   defaultHeaders: {
-    "X-AILens-Project-Key": "ailens_p_•••"
+    "X-AILens-Project-Key": "sk-demo•••"
   }
 });`}</pre>
                 </div>

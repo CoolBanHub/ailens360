@@ -7,7 +7,13 @@ export interface Project {
   project_key: string;
   name: string;
   proxy_prefix: string;
-  example: { openai: string; anthropic: string; gemini: string };
+  example: {
+    openai: string;
+    anthropic: string;
+    gemini: string;
+    path_key?: { openai: string; anthropic: string; gemini: string };
+    query_key?: { openai: string; anthropic: string; gemini: string };
+  };
   created_at: number;
   updated_at: number;
 }

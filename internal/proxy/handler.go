@@ -76,39 +76,84 @@ func (h *Handler) Mount(mux interface {
 	mux.HandleFunc("/*", h.serve)
 }
 
-// parseProxyPath extracts the embedded upstream URL from a proxy request path.
-// The expected shape is `/<scheme>://<rest>` where scheme is http or https.
-// The project the request belongs to is identified out-of-band via the
-// X-AILens-Project-Key header.
-func parseProxyPath(p string) (upstream string, ok bool) {
+type proxyTarget struct {
+	upstreamRaw string
+	projectKey  string
+	rawQuery    string
+}
+
+// parseProxyPath extracts the embedded upstream URL and optional project key
+// from a proxy request path. Supported shapes:
+//   - /<scheme>://<upstream>
+//   - /<project_key>/<scheme>://<upstream>
+func parseProxyPath(p string) (upstream, projectKey string, ok bool) {
 	if len(p) == 0 || p[0] != '/' {
-		return "", false
+		return "", "", false
 	}
 	rest := p[1:]
 	if !strings.HasPrefix(rest, "http://") && !strings.HasPrefix(rest, "https://") {
-		return "", false
+		slash := strings.IndexByte(rest, '/')
+		if slash <= 0 {
+			return "", "", false
+		}
+		projectKey = rest[:slash]
+		if !strings.HasPrefix(projectKey, "sk-") {
+			return "", "", false
+		}
+		rest = rest[slash+1:]
+		if !strings.HasPrefix(rest, "http://") && !strings.HasPrefix(rest, "https://") {
+			return "", "", false
+		}
 	}
-	return rest, true
+	return rest, projectKey, true
+}
+
+func parseProxyTarget(r *http.Request) (proxyTarget, bool) {
+	upstreamRaw, pathProjectKey, ok := parseProxyPath(r.URL.Path)
+	if !ok {
+		return proxyTarget{}, false
+	}
+	projectKey := r.Header.Get("X-AILens-Project-Key")
+	if projectKey == "" {
+		projectKey = pathProjectKey
+	}
+
+	rawQuery := r.URL.RawQuery
+	if projectKey == "" && rawQuery != "" {
+		q, err := url.ParseQuery(rawQuery)
+		if err == nil {
+			projectKey = q.Get("sk")
+			if projectKey != "" {
+				q.Del("sk")
+				rawQuery = q.Encode()
+			}
+		}
+	}
+
+	return proxyTarget{
+		upstreamRaw: upstreamRaw,
+		projectKey:  projectKey,
+		rawQuery:    rawQuery,
+	}, true
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	tl := stream.Timeline{RequestIn: time.Now()}
 
-	upstreamRaw, ok := parseProxyPath(r.URL.Path)
+	target, ok := parseProxyTarget(r)
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "invalid_path",
-			"expected /<scheme>://<upstream>, e.g. /https://api.openai.com/v1/chat/completions")
+			"expected /<scheme>://<upstream> or /<project_key>/<scheme>://<upstream>, e.g. /sk-xxx/https://api.openai.com/v1/chat/completions")
 		return
 	}
 
-	projectKey := r.Header.Get("X-AILens-Project-Key")
-	if projectKey == "" {
+	if target.projectKey == "" {
 		writeJSONError(w, http.StatusUnauthorized, "missing_project_key",
-			"missing X-AILens-Project-Key header")
+			"missing project key; send X-AILens-Project-Key, /<project_key>/<scheme>://..., or ?sk=<project_key>")
 		return
 	}
 
-	proj, err := h.resolver.Resolve(r.Context(), projectKey)
+	proj, err := h.resolver.Resolve(r.Context(), target.projectKey)
 	if err != nil {
 		switch {
 		case errors.Is(err, project.ErrProjectNotFound):
@@ -121,8 +166,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Preserve the query string the client attached (e.g. ?key=... for Gemini).
-	if r.URL.RawQuery != "" {
-		upstreamRaw += "?" + r.URL.RawQuery
+	upstreamRaw := target.upstreamRaw
+	if target.rawQuery != "" {
+		upstreamRaw += "?" + target.rawQuery
 	}
 
 	upstreamURL, err := url.Parse(upstreamRaw)

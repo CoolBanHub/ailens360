@@ -7,11 +7,15 @@ import { copyToClipboard } from '../../lib/fmt';
 import { SecretField } from '../../components/SecretField';
 import { useT } from '../../i18n';
 
-const presets: { label: string; key: keyof Project['example']; grad: string; }[] = [
+type ProviderKey = 'openai' | 'anthropic' | 'gemini';
+
+const presets: { label: string; key: ProviderKey; grad: string; }[] = [
   { label: 'OpenAI',    key: 'openai',    grad: 'from-emerald-300 to-teal-400' },
   { label: 'Anthropic', key: 'anthropic', grad: 'from-orange-300 to-rose-400' },
   { label: 'Gemini',    key: 'gemini',    grad: 'from-sky-300 to-indigo-400' },
 ];
+
+type AccessMode = 'header' | 'path' | 'query';
 
 export default function ProjectSetup() {
   const { projectId = '' } = useParams();
@@ -44,6 +48,12 @@ export default function ProjectSetup() {
     const idx = sample.indexOf('/https://');
     return idx > 0 ? sample.slice(0, idx) : sample.replace(/\/+$/, '');
   })();
+
+  const exampleFor = (mode: AccessMode, key: ProviderKey) => {
+    if (mode === 'path') return p.example.path_key?.[key] ?? `${gatewayBase}/${p.project_key}/${p.example[key].slice(gatewayBase.length + 1)}`;
+    if (mode === 'query') return p.example.query_key?.[key] ?? `${p.example[key]}?sk=${encodeURIComponent(p.project_key)}`;
+    return p.example[key];
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -119,21 +129,36 @@ export default function ProjectSetup() {
               {copied === '__gateway__' ? '✓' : t('common.copy')}
             </button>
           </div>
-          {presets.map(({ label, key, grad }) => (
-            <div key={label} className="flex items-center gap-3">
-              <span className={`shrink-0 inline-flex items-center justify-center w-[96px]
-                                rounded-full text-[11px] font-semibold text-white py-1
-                                bg-gradient-to-r ${grad}
-                                shadow-[0_2px_6px_-2px_rgba(15,23,42,0.2)]`}>
-                {label}
-              </span>
-              <div className="flex-1 min-w-0 code-line truncate">{p.example[key]}</div>
-              <button
-                onClick={() => copy(label, p.example[key])}
-                className="btn-ghost shrink-0 !text-[12px] !py-1.5 !px-3"
-              >
-                {copied === label ? '✓' : t('common.copy')}
-              </button>
+          {([
+            ['header', t('setup.step2.modeHeader')],
+            ['path', t('setup.step2.modePath')],
+            ['query', t('setup.step2.modeQuery')],
+          ] as const).map(([mode, title]) => (
+            <div key={mode} className="rounded-2xl border border-white/70 bg-white/35 p-3.5">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-4">{title}</div>
+              <div className="flex flex-col gap-2.5">
+                {presets.map(({ label, key, grad }) => {
+                  const value = exampleFor(mode as AccessMode, key);
+                  const copyKey = `${mode}:${label}`;
+                  return (
+                    <div key={`${mode}:${label}`} className="flex items-center gap-3">
+                      <span className={`shrink-0 inline-flex items-center justify-center w-[96px]
+                                        rounded-full text-[11px] font-semibold text-white py-1
+                                        bg-gradient-to-r ${grad}
+                                        shadow-[0_2px_6px_-2px_rgba(15,23,42,0.2)]`}>
+                        {label}
+                      </span>
+                      <div className="flex-1 min-w-0 code-line truncate">{value}</div>
+                      <button
+                        onClick={() => copy(copyKey, value)}
+                        className="btn-ghost shrink-0 !text-[12px] !py-1.5 !px-3"
+                      >
+                        {copied === copyKey ? '✓' : t('common.copy')}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ))}
         </div>

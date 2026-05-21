@@ -12,7 +12,7 @@
 
 AILens360 是一个**开源、自部署、低代码侵入**的 AI 应用可观测性平台。
 
-通常只需要把代码里的 `baseURL` 从 `https://api.openai.com/v1` 改成 `http://your-ailens360/https://api.openai.com/v1`（在代理 origin 后面**直接拼上完整的上游 URL**），再在请求头里加一个 `X-AILens-Project-Key: <控制台分配的项目密钥>`。原本的 `Authorization` / `x-api-key` 透传到上游，**AILens360 不持有、不存储真实上游 API Key**。
+通常只需要把代码里的 `baseURL` 从 `https://api.openai.com/v1` 改成 `http://your-ailens360/https://api.openai.com/v1`（在代理 origin 后面**直接拼上完整的上游 URL**），再通过 `X-AILens-Project-Key: <sk-...>` 请求头、`/<sk-...>/` 路径前缀或 `?sk=<sk-...>` 查询参数提供项目密钥。原本的 `Authorization` / `x-api-key` 透传到上游，**AILens360 不持有、不存储真实上游 API Key**。
 
 无需引入任何 SDK；多数 OpenAI 兼容 SDK 场景只需要调整 `baseURL`，应用代码几乎零改动。
 
@@ -30,10 +30,10 @@ AILens360 用一个**反向代理 + 可视化控制台**的方式，让上面这
 ## 核心特性
 
 ### 🔌 低侵入式集成
-- 改 `baseURL` + 加一个请求头就能开始观测，不用引入 SDK
+- 改 `baseURL` + 提供项目密钥就能开始观测，不用引入 SDK
 - 原 `Authorization` 直接透传到上游，AILens360 不持有真实 Key
 - 上游地址直接拼到 baseURL 后面；已内建 OpenAI / Anthropic / Gemini 解析，并默认兼容多数 OpenAI 风格上游
-- 项目密钥通过 `X-AILens-Project-Key` 请求头识别，与上游路径解耦
+- 项目密钥格式为 `sk-...`，支持 Header / 路径前缀 / Query 三种传递方式
 - SSE 解析器按上游 host 在内部选择（OpenAI / Anthropic / Gemini），调用方无感
 - 流式（SSE）响应自动解析
 
@@ -74,24 +74,24 @@ AILens360 用一个**反向代理 + 可视化控制台**的方式，让上面这
 
 > ⚠️ 项目处于早期开发阶段。核心代理、项目管理、trace 查询、用量统计与基础控制台已可运行；部分能力仍在持续补全。
 
-### 核心思路：URL 内嵌上游 + 头部传项目密钥 + Authorization 透传
+### 核心思路：URL 内嵌上游 + 项目密钥 + Authorization 透传
 
-AILens360 的核心设计是 **"创建 Project → 拿 project_key → baseURL 直接拼上游 URL，请求头里塞 project_key"**。Project 是唯一的一级概念，**上游地址完全由客户端在 baseURL 里指定**，原 `Authorization` 直接透传到上游。
+AILens360 的核心设计是 **"创建 Project → 拿 project_key → baseURL 直接拼上游 URL → 提供 project_key"**。Project 是唯一的一级概念，**上游地址完全由客户端在 baseURL 里指定**，原 `Authorization` 直接透传到上游。
 
 ```
 ┌──────────────────────────────────┐
 │ 控制台创建 Project:                │
-│ project_key  = <64-char base62>   │
+│ project_key  = sk-<64-char base62>│
 │ proxy_prefix = 代理 origin         │
 └──────────────┬───────────────────┘
                │ 应用 baseURL = proxy_prefix + "/" + 完整上游 URL
-               │ 请求头 X-AILens-Project-Key: <project_key>
+               │ 项目密钥：Header / 路径前缀 / Query 三选一
                │ 原 Authorization 透传到上游
                ▼
 ┌─────────────────────────────────────┐
 │ AILens360 Proxy  (:8080)             │
-│ - 解析路径 /<scheme>://<upstream>     │
-│ - X-AILens-Project-Key 解析 Project   │
+│ - 解析 /<scheme>://... 或 /<sk-...>/<scheme>://... │
+│ - 从 Header / Path / Query 解析 Project             │
 │ - 按上游 host 选 SSE 解析器           │
 │ - 透传 Authorization 到上游           │
 │ - 上传请求/响应正文到 MinIO           │
@@ -125,21 +125,33 @@ curl -X POST http://localhost:8081/api/projects \
      -d '{"name":"my-app"}'
 # → {
 #     "data": {
-#       "project_key": "kJ8s...64-char...",
+#       "project_key": "sk-demo...",
 #       "proxy_prefix": "http://localhost:8080",
 #       "example": {
 #         "openai":    "http://localhost:8080/https://api.openai.com/v1",
 #         "anthropic": "http://localhost:8080/https://api.anthropic.com",
-#         "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta"
+#         "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta",
+#         "path_key": {
+#           "openai": "http://localhost:8080/sk-demo.../https://api.openai.com/v1"
+#         },
+#         "query_key": {
+#           "openai": "http://localhost:8080/https://api.openai.com/v1?sk=sk-demo..."
+#         }
 #       }
 #     }
 #   }
 
-# 3. baseURL 拼完整上游 URL；project_key 进 X-AILens-Project-Key 头；
+# 3. baseURL 拼完整上游 URL；project_key 可放 Header、路径前缀或 ?sk=；
 #    Authorization 用你真实的上游 Key
 curl -X POST 'http://localhost:8080/https://api.openai.com/v1/chat/completions' \
      -H "Authorization: Bearer sk-real-openai-key" \
-     -H "X-AILens-Project-Key: kJ8s...64-char..." \
+     -H "X-AILens-Project-Key: sk-demo..." \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+
+# 等价写法：路径模式
+curl -X POST 'http://localhost:8080/sk-demo.../https://api.openai.com/v1/chat/completions' \
+     -H "Authorization: Bearer sk-real-openai-key" \
      -H 'Content-Type: application/json' \
      -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
@@ -155,7 +167,7 @@ client = OpenAI(api_key="sk-real-openai-key",
 client = OpenAI(
     api_key="sk-real-openai-key",
     base_url="http://localhost:8080/https://api.openai.com/v1",
-    default_headers={"X-AILens-Project-Key": "kJ8s...64-char..."},
+    default_headers={"X-AILens-Project-Key": "sk-demo..."},
 )
 # SDK 会在 base_url 末尾自动追加 /chat/completions，
 # 代理实际收到的请求是：
@@ -164,12 +176,15 @@ client = OpenAI(
 # 接入 DeepSeek / Groq / 本地 vLLM 只需要换掉 base_url 里的上游 URL 段：
 # base_url="http://localhost:8080/https://api.deepseek.com/v1"
 # base_url="http://localhost:8080/http://localhost:11434/v1"  # Ollama
+
+# 如果客户端不方便加自定义 Header，也可以把项目密钥放入路径前缀：
+# base_url="http://localhost:8080/sk-demo.../https://api.openai.com/v1"
 ```
 
 ### 这样设计的好处
 
 - **真实 API Key 不在 AILens360 落地**：透传到上游，trace 落库前强制 REDACT，AILens360 数据库被拷走也不泄露 Key
-- **接入像 Langfuse 一样简单**：创建 Project → 拿 project_key → 改一行 baseURL + 加一个请求头，3 步搞定
+- **接入像 Langfuse 一样简单**：创建 Project → 拿 `sk-...` project_key → 改一行 baseURL + 选一种密钥传递方式，3 步搞定
 - **任意上游都能进**：DeepSeek / Groq / Together / Moonshot / 本地 vLLM / Ollama / 自建 OpenAI 兼容服务，不需要在 AILens360 侧做任何 per-project 上游配置
 - **按 Project 维度统计**：天然就有了项目 / 环境维度的成本与用量归因
 
@@ -384,7 +399,7 @@ pnpm dev
 ```
    你的应用                                    AILens360 (三进程)                              LLM 服务商
 ┌──────────────┐  baseURL=/{上游URL}    ┌──────────────────────┐   Authorization 透传     ┌─────────────┐
-│  Your App    │  + project_key 头       │  proxy  (:8080)      │ ─────────────────────>   │ OpenAI/     │
+│  Your App    │  + sk 项目密钥          │  proxy  (:8080)      │ ─────────────────────>   │ OpenAI/     │
 │  (任意语言)   │ ─────────────────────>  │  - 解析 /<scheme>://  │                          │ Anthropic/  │
 │              │ <─────────────────────  │  - 上传正文 → MinIO   │ <─────── 流式响应 ────── │ Gemini/...  │
 └──────────────┘      流式响应            │  - XADD → Stream     │                          └─────────────┘

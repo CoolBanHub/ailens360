@@ -20,9 +20,11 @@ type CreateInput struct {
 	Name string
 }
 
-// projectKeyLen is the length of the per-project secret callers send in the
-// X-AILens-Project-Key header. 64 chars of base62 ≈ 381 bits of entropy.
+// projectKeyLen is the random suffix length for per-project secrets. The full
+// key is "sk-" + 64 chars of base62 ≈ 381 bits of entropy.
 const projectKeyLen = 64
+
+const projectKeyPrefix = "sk-"
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (*repo.Project, error) {
 	if in.Name == "" {
@@ -53,6 +55,7 @@ func (s *Service) allocProjectKey(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		key = projectKeyPrefix + key
 		_, err = s.repo.GetByProjectKey(ctx, key)
 		if errors.Is(err, repo.ErrNotFound) {
 			return key, nil

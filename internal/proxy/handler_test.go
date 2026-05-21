@@ -19,27 +19,90 @@ import (
 
 func TestParseProxyPath(t *testing.T) {
 	cases := []struct {
-		in           string
-		wantUpstream string
-		wantOK       bool
+		in             string
+		wantUpstream   string
+		wantProjectKey string
+		wantOK         bool
 	}{
 		{"/https://api.openai.com/v1/chat/completions",
-			"https://api.openai.com/v1/chat/completions", true},
+			"https://api.openai.com/v1/chat/completions", "", true},
 		{"/https://api.anthropic.com/v1/messages",
-			"https://api.anthropic.com/v1/messages", true},
+			"https://api.anthropic.com/v1/messages", "", true},
 		{"/http://localhost:11434/v1/chat/completions",
-			"http://localhost:11434/v1/chat/completions", true},
-		{"/p/https://api.openai.com/v1/chat/completions", "", false}, // old shape rejected
-		{"/", "", false},                       // no upstream
-		{"/healthz", "", false},                // not a proxy path
-		{"/ftp://example.com/file", "", false}, // wrong scheme
+			"http://localhost:11434/v1/chat/completions", "", true},
+		{"/sk-abc/https://api.openai.com/v1/chat/completions",
+			"https://api.openai.com/v1/chat/completions", "sk-abc", true},
+		{"/p/https://api.openai.com/v1/chat/completions", "", "", false}, // non-sk prefix rejected
+		{"/", "", "", false},                       // no upstream
+		{"/healthz", "", "", false},                // not a proxy path
+		{"/ftp://example.com/file", "", "", false}, // wrong scheme
 	}
 	for _, c := range cases {
-		up, ok := parseProxyPath(c.in)
-		if ok != c.wantOK || up != c.wantUpstream {
-			t.Errorf("parseProxyPath(%q) = (%q, %v), want (%q, %v)",
-				c.in, up, ok, c.wantUpstream, c.wantOK)
+		up, projectKey, ok := parseProxyPath(c.in)
+		if ok != c.wantOK || up != c.wantUpstream || projectKey != c.wantProjectKey {
+			t.Errorf("parseProxyPath(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.in, up, projectKey, ok, c.wantUpstream, c.wantProjectKey, c.wantOK)
 		}
+	}
+}
+
+func TestParseProxyTarget(t *testing.T) {
+	cases := []struct {
+		name             string
+		target           string
+		headerProjectKey string
+		wantUpstream     string
+		wantProjectKey   string
+		wantRawQuery     string
+	}{
+		{
+			name:             "header key",
+			target:           "/https://api.openai.com/v1/chat/completions?foo=bar",
+			headerProjectKey: "sk-header",
+			wantUpstream:     "https://api.openai.com/v1/chat/completions",
+			wantProjectKey:   "sk-header",
+			wantRawQuery:     "foo=bar",
+		},
+		{
+			name:           "path key",
+			target:         "/sk-path/https://api.openai.com/v1/chat/completions?foo=bar",
+			wantUpstream:   "https://api.openai.com/v1/chat/completions",
+			wantProjectKey: "sk-path",
+			wantRawQuery:   "foo=bar",
+		},
+		{
+			name:           "query key stripped from upstream query",
+			target:         "/https://api.openai.com/v1/chat/completions?foo=bar&sk=sk-query",
+			wantUpstream:   "https://api.openai.com/v1/chat/completions",
+			wantProjectKey: "sk-query",
+			wantRawQuery:   "foo=bar",
+		},
+		{
+			name:             "header key keeps sk query for upstream",
+			target:           "/https://api.openai.com/v1/chat/completions?foo=bar&sk=upstream-sk",
+			headerProjectKey: "sk-header",
+			wantUpstream:     "https://api.openai.com/v1/chat/completions",
+			wantProjectKey:   "sk-header",
+			wantRawQuery:     "foo=bar&sk=upstream-sk",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, c.target, nil)
+			if c.headerProjectKey != "" {
+				req.Header.Set("X-AILens-Project-Key", c.headerProjectKey)
+			}
+
+			got, ok := parseProxyTarget(req)
+			if !ok {
+				t.Fatal("parseProxyTarget ok = false, want true")
+			}
+			if got.upstreamRaw != c.wantUpstream || got.projectKey != c.wantProjectKey || got.rawQuery != c.wantRawQuery {
+				t.Fatalf("parseProxyTarget = (%q, %q, %q), want (%q, %q, %q)",
+					got.upstreamRaw, got.projectKey, got.rawQuery,
+					c.wantUpstream, c.wantProjectKey, c.wantRawQuery)
+			}
+		})
 	}
 }
 
@@ -75,6 +138,57 @@ func TestServeRejectsRequestBodyOverConfiguredLimit(t *testing.T) {
 	}
 }
 
+func TestServeAcceptsPathProjectKey(t *testing.T) {
+	var gotPath string
+	var gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler("sk-path")
+	req := httptest.NewRequest(http.MethodPost, "/sk-path/"+upstream.URL+"/v1/chat/completions?foo=bar", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+
+	h.serve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gotQuery != "foo=bar" {
+		t.Fatalf("upstream query = %q, want %q", gotQuery, "foo=bar")
+	}
+}
+
+func TestServeAcceptsQueryProjectKeyAndStripsItFromUpstream(t *testing.T) {
+	var gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	h := newTestHandler("sk-query")
+	req := httptest.NewRequest(http.MethodPost, "/"+upstream.URL+"/v1/chat/completions?foo=bar&sk=sk-query", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+
+	h.serve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotQuery != "foo=bar" {
+		t.Fatalf("upstream query = %q, want %q", gotQuery, "foo=bar")
+	}
+}
+
 type noopSink struct{}
 
 func (noopSink) Submit(*stream.Event) {}
@@ -101,6 +215,19 @@ type discardUploader struct{}
 func (discardUploader) Write(p []byte) (int, error) { return io.Discard.Write(p) }
 func (discardUploader) Close() error                { return nil }
 func (discardUploader) BytesWritten() int64         { return 0 }
+
+func newTestHandler(projectKey string) *Handler {
+	return NewHandler(Deps{
+		Resolver: project.NewResolver(
+			&proxyProjectRepo{project: &repo.Project{ID: "prj_1", ProjectKey: projectKey}},
+			&proxyProjectCache{project: &repo.Project{ID: "prj_1", ProjectKey: projectKey}},
+		),
+		Sink:      noopSink{},
+		BodyStore: noopStore{},
+		RawLimit:  1024,
+		MaxBody:   1024,
+	})
+}
 
 type proxyProjectRepo struct {
 	project *repo.Project

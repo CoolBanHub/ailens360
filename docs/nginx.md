@@ -129,7 +129,7 @@ curl -is -X POST https://ailens.example.com/https://api.openai.com/v1/chat/compl
   -d '{}' --max-time 5 | head -5
 ```
 
-控制台返回的 `proxy_prefix` 应该等于 `https://ailens.example.com`（不带 `/p`），客户端 SDK 直接 `base_url = "https://ailens.example.com/https://api.openai.com/v1"` 即可。
+控制台返回的 `proxy_prefix` 应该等于 `https://ailens.example.com`（不带 `/p`）。客户端 SDK 可以使用 `base_url = "https://ailens.example.com/https://api.openai.com/v1"` 并加 `X-AILens-Project-Key`，也可以使用路径模式 `base_url = "https://ailens.example.com/sk-xxx/https://api.openai.com/v1"`。
 
 ## 四、替代方案：拆两个子域名
 
@@ -302,7 +302,7 @@ from openai import OpenAI
 client = OpenAI(
     api_key="sk-real-openai-key",                                # 真实上游 Key，原样透传
     base_url="https://ailens.example.com/https://api.openai.com/v1",
-    default_headers={"X-AILens-Project-Key": "<控制台拿到的 project_key>"},
+    default_headers={"X-AILens-Project-Key": "sk-<控制台拿到的 project_key>"},
 )
 
 resp = client.chat.completions.create(
@@ -321,7 +321,7 @@ for chunk in resp:
 | 现象 | 病因 | 修法 |
 |---|---|---|
 | `POST` 返回 `405 Method Not Allowed`，`Allow: GET, HEAD` | 流量走到了 api 进程（它对未识别路径只挂 GET/HEAD 给 SPA 用），证明 `^~ /https://` location 没匹配 | 99% 是 `merge_slashes off;` 缺了或不在正确的 server 块里。`nginx -T \| grep merge_slashes` 确认 |
-| `POST` 返回 `404 project_not_found` | 流量正确路由到 proxy 了，但 X-AILens-Project-Key 头错或缺 | 改 SDK 把 header 加上 |
+| `POST` 返回 `404 project_not_found` | 流量正确路由到 proxy 了，但项目密钥错了 | 检查 `X-AILens-Project-Key` / 路径前缀 / `?sk=` 中的 `sk-...` |
 | 首 token 延迟 5 秒以上 | nginx 在 buffer SSE | 检查 `proxy_buffering off;` 是否在 location 块里 |
 | 流式响应中途中断 | nginx 超时 | `proxy_read_timeout` / `proxy_send_timeout` 拉到 1h+ |
 | 控制台示例 URL 显示了 nginx 端口而不是域名 | 后端 `AILENS360_PUBLIC_URL` 没配 | `.env` 里设 `AILENS360_PUBLIC_URL=https://ailens.example.com`，重启 api |

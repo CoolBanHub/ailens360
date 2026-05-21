@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -180,10 +181,20 @@ func (h *Handlers) projectView(p *repo.Project, r *http.Request) map[string]any 
 		"project_key":  p.ProjectKey,
 		"name":         p.Name,
 		"proxy_prefix": prefix,
-		"example": map[string]string{
+		"example": map[string]any{
 			"openai":    prefix + "/https://api.openai.com/v1",
 			"anthropic": prefix + "/https://api.anthropic.com",
 			"gemini":    prefix + "/https://generativelanguage.googleapis.com/v1beta",
+			"path_key": map[string]string{
+				"openai":    prefix + "/" + p.ProjectKey + "/https://api.openai.com/v1",
+				"anthropic": prefix + "/" + p.ProjectKey + "/https://api.anthropic.com",
+				"gemini":    prefix + "/" + p.ProjectKey + "/https://generativelanguage.googleapis.com/v1beta",
+			},
+			"query_key": map[string]string{
+				"openai":    prefix + "/https://api.openai.com/v1?sk=" + url.QueryEscape(p.ProjectKey),
+				"anthropic": prefix + "/https://api.anthropic.com?sk=" + url.QueryEscape(p.ProjectKey),
+				"gemini":    prefix + "/https://generativelanguage.googleapis.com/v1beta?sk=" + url.QueryEscape(p.ProjectKey),
+			},
 		},
 		"created_at": p.CreatedAt.Unix(),
 		"updated_at": p.UpdatedAt.Unix(),

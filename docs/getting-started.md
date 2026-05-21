@@ -88,13 +88,19 @@ curl -X POST http://localhost:8081/api/projects \
   "code": 0,
   "data": {
     "id": "prj_01HV...",
-    "project_key": "kJ8s...64-char-base62...",
+    "project_key": "sk-demo...",
     "name": "hello-ailens",
     "proxy_prefix": "http://localhost:8080",
     "example": {
       "openai":    "http://localhost:8080/https://api.openai.com/v1",
       "anthropic": "http://localhost:8080/https://api.anthropic.com",
-      "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta"
+      "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta",
+      "path_key": {
+        "openai": "http://localhost:8080/sk-demo.../https://api.openai.com/v1"
+      },
+      "query_key": {
+        "openai": "http://localhost:8080/https://api.openai.com/v1?sk=sk-demo..."
+      }
     },
     "created_at": 1778575825,
     "updated_at": 1778575825
@@ -102,18 +108,24 @@ curl -X POST http://localhost:8081/api/projects \
 }
 ```
 
-把 `example.openai` 当成应用 SDK 的 `base_url`，再把 `project_key` 放进 `X-AILens-Project-Key` 头即可。`proxy_prefix` 是 **proxy 进程的 origin**（自动识别请求 host 并替换为 proxy 端口；生产建议显式配 `AILENS360_PUBLIC_URL`）。
+把 `example.openai` 当成应用 SDK 的 `base_url`，再把 `project_key` 放进 `X-AILens-Project-Key` 头即可。也可以直接使用 `example.path_key.openai`，把 `sk-...` 放在 URL 路径里；或使用 `example.query_key.openai`，把 `sk-...` 放在查询参数里。`proxy_prefix` 是 **proxy 进程的 origin**（自动识别请求 host 并替换为 proxy 端口；生产建议显式配 `AILENS360_PUBLIC_URL`）。
 
 ## 四、发起一次带观测的调用
 
-代理 URL 形态：**`http://localhost:8080/{完整上游 URL}`**（注意 `/` 后直接拼 `http://` 或 `https://`，无 `/p/` 前缀）。
+代理 URL 形态：**`http://localhost:8080/{完整上游 URL}`**（注意 `/` 后直接拼 `http://` 或 `https://`，无 `/p/` 前缀）。项目密钥支持三种来源，优先级是 Header > Path > Query：
+
+```text
+Header: X-AILens-Project-Key: sk-xxx
+Path:   http://localhost:8080/sk-xxx/https://api.openai.com/v1/chat/completions
+Query:  http://localhost:8080/https://api.openai.com/v1/chat/completions?sk=sk-xxx
+```
 
 ### curl 直发
 
 ```bash
 curl -X POST 'http://localhost:8080/https://api.openai.com/v1/chat/completions' \
   -H 'Authorization: Bearer sk-real-openai-key' \
-  -H 'X-AILens-Project-Key: kJ8s...64-char-base62...' \
+  -H 'X-AILens-Project-Key: sk-demo...' \
   -H 'Content-Type: application/json' \
   -d '{
         "model":"gpt-4o-mini",
@@ -122,7 +134,7 @@ curl -X POST 'http://localhost:8080/https://api.openai.com/v1/chat/completions' 
       }'
 ```
 
-> 请求中的 `Authorization` 是**真实的 OpenAI Key**，AILens360 仅在内存中透传给上游，**不会写入数据库**。`X-AILens-Project-Key` 用于识别项目归属，**视同密钥**，落库前会被 REDACT。请求/响应正文上传到 MinIO，PG 只存对象 key。
+> 请求中的 `Authorization` 是**真实的 OpenAI Key**，AILens360 仅在内存中透传给上游，**不会写入数据库**。`project_key` 用于识别项目归属，**视同密钥**；Header 模式落库前会被 REDACT，Query 模式中的 `sk` 会在转发上游前剥离。请求/响应正文上传到 MinIO，PG 只存对象 key。
 
 ### OpenAI Python SDK
 
@@ -132,7 +144,7 @@ from openai import OpenAI
 client = OpenAI(
     api_key="sk-real-openai-key",
     base_url="http://localhost:8080/https://api.openai.com/v1",
-    default_headers={"X-AILens-Project-Key": "kJ8s...64-char-base62..."},
+    default_headers={"X-AILens-Project-Key": "sk-demo..."},
 )
 
 resp = client.chat.completions.create(
@@ -152,13 +164,13 @@ import anthropic
 client = anthropic.Anthropic(
     api_key="sk-ant-real-key",
     base_url="http://localhost:8080/https://api.anthropic.com",
-    default_headers={"X-AILens-Project-Key": "kJ8s...64-char-base62..."},
+    default_headers={"X-AILens-Project-Key": "sk-demo..."},
 )
 ```
 
 ### 接入第三方 / 自建 OpenAI 兼容上游
 
-只换 baseURL 末尾的上游 URL（`X-AILens-Project-Key` 头照旧）：
+只换 baseURL 末尾的上游 URL（项目密钥传递方式照旧）：
 
 ```python
 # DeepSeek
@@ -175,7 +187,7 @@ base_url="http://localhost:8080/http://localhost:11434/v1"
 
 | Header | 作用 |
 |---|---|
-| `X-AILens-Project-Key` | **必填**。项目密钥（创建 Project 时颁发） |
+| `X-AILens-Project-Key` | 可选。项目密钥（创建 Project 时颁发）；也可以用路径前缀 `/<sk-...>/` 或 query `?sk=<sk-...>` |
 | `X-AILens-User` | 终端用户 ID |
 | `X-AILens-Session` | 会话 ID（同一会话内多次调用聚合） |
 | `X-AILens-Tag` | 自定义标签，逗号分隔 |
@@ -187,7 +199,7 @@ base_url="http://localhost:8080/http://localhost:11434/v1"
 ```bash
 curl -X POST 'http://localhost:8080/https://api.openai.com/v1/chat/completions' \
   -H 'Authorization: Bearer sk-real-openai-key' \
-  -H 'X-AILens-Project-Key: kJ8s...64-char-base62...' \
+  -H 'X-AILens-Project-Key: sk-demo...' \
   -H 'X-AILens-User: user_001' \
   -H 'X-AILens-Session: sess_abc' \
   -H 'X-AILens-Tag: prod,chatbot' \
