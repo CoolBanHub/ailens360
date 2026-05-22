@@ -6,6 +6,8 @@
 // Usage: <ChatViewer raw={t.RequestBody} mode="request" /> or mode="response".
 
 import { useState } from 'react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { copyToClipboard, prettyJSON } from '../lib/fmt';
 import { useT } from '../i18n';
 
@@ -64,14 +66,14 @@ interface Props {
 export default function ChatViewer({ raw, mode }: Props) {
   const t = useT();
   const [view, setView] = useState<'pretty' | 'raw'>('pretty');
+  const parsed = parseJSON(raw);
 
   // Streaming responses arrive as raw SSE (`data: {...}\n\n` frames) in `raw`.
   // Reassemble them client-side so the pretty view can render the same chat
   // bubble shape it uses for non-stream completions, while raw view still
   // shows the original SSE bytes verbatim for debugging.
-  const messages = mode === 'response' && looksLikeOpenAISSE(raw)
-    ? assembleOpenAIStream(raw)
-    : extractMessages(parseJSON(raw), mode);
+  const streamMessages = mode === 'response' ? assembleStream(raw) : [];
+  const messages = streamMessages.length > 0 ? streamMessages : extractMessages(parsed, mode);
   // Render Pretty only when we found something useful; otherwise default to Raw
   const canPretty = messages.length > 0;
   const effective = canPretty ? view : 'raw';
@@ -188,27 +190,6 @@ function parseJSON(s: string | null | undefined): ChatPayload | null {
 
 /* ── SSE assembly (streaming response → pretty message) ────── */
 
-// Treat the body as OpenAI-style SSE when at least one frame line begins
-// with `data: {`. Anthropic's typed events (`event: ...\ndata: {...}`) also
-// match — we'd need a different assembler for them, so be strict: only
-// accept frames whose payload looks like an OpenAI chunk (has `choices`).
-function looksLikeOpenAISSE(s: string | null | undefined): boolean {
-  if (!s) return false;
-  // Cheap pre-check before full parse.
-  if (!/^data:\s*\{/m.test(s)) return false;
-  for (const line of s.split('\n')) {
-    if (!line.startsWith('data:')) continue;
-    const payload = line.slice(5).trim();
-    if (!payload || payload === '[DONE]') continue;
-    try {
-      const obj = JSON.parse(payload);
-      if (obj && Array.isArray(obj.choices)) return true;
-    } catch { /* malformed chunk — keep scanning */ }
-    return false;
-  }
-  return false;
-}
-
 interface OpenAIToolDelta {
   index?: number;
   id?: string;
@@ -240,6 +221,68 @@ interface ChoiceBuilder {
   content: string;
   toolBuilders: Map<number, ToolCallBuilder>;
   toolOrder: number[];
+}
+
+interface SSEFrame {
+  event: string;
+  data: string;
+}
+
+function assembleStream(raw: string | null | undefined): Message[] {
+  const frames = parseSSE(raw);
+  if (frames.length === 0) return [];
+
+  const objects = frames
+    .map((f) => ({ event: f.event, obj: parseJSONObject(f.data) }))
+    .filter((x): x is { event: string; obj: Record<string, any> } => !!x.obj);
+
+  if (objects.some((x) => typeof x.obj.type === 'string' && x.obj.type.startsWith('response.'))) {
+    return assembleResponsesStream(objects);
+  }
+  if (frames.some((f) => f.event === 'message_start' || f.event === 'content_block_delta' || f.event === 'message_delta')) {
+    return assembleAnthropicStream(objects);
+  }
+  if (objects.some((x) => Array.isArray(x.obj.choices))) {
+    return assembleOpenAIStream(raw);
+  }
+  return [];
+}
+
+function parseSSE(raw: string | null | undefined): SSEFrame[] {
+  if (!raw || !/^data:/m.test(raw)) return [];
+  const out: SSEFrame[] = [];
+  let event = '';
+  let data: string[] = [];
+
+  const flush = () => {
+    if (data.length > 0) out.push({ event, data: data.join('\n') });
+    event = '';
+    data = [];
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (line === '') {
+      flush();
+      continue;
+    }
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      const v = line.slice(5).trim();
+      if (v && v !== '[DONE]') data.push(v);
+    }
+  }
+  flush();
+  return out;
+}
+
+function parseJSONObject(s: string): Record<string, any> | null {
+  try {
+    const v = JSON.parse(s);
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 // assembleOpenAIStream folds OpenAI-style SSE frames back into one Message
@@ -314,6 +357,154 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   return out;
 }
 
+function assembleResponsesStream(frames: Array<{ event: string; obj: Record<string, any> }>): Message[] {
+  const msg: Message = { role: 'assistant', content: '' };
+  const tools = new Map<string, ToolCallBuilder>();
+  const order: string[] = [];
+
+  const toolFor = (key: string): ToolCallBuilder => {
+    let tb = tools.get(key);
+    if (!tb) {
+      tb = { args: '' };
+      tools.set(key, tb);
+      order.push(key);
+    }
+    return tb;
+  };
+
+  for (const { obj } of frames) {
+    const typ = String(obj.type || '');
+    if ((typ === 'response.output_text.delta' || typ === 'response.refusal.delta') && typeof obj.delta === 'string') {
+      msg.content = String(msg.content || '') + obj.delta;
+      continue;
+    }
+    if (typ === 'response.output_text.done' && !msg.content && typeof obj.text === 'string') {
+      msg.content = obj.text;
+      continue;
+    }
+    if (typ === 'response.function_call_arguments.delta') {
+      const key = String(obj.item_id || obj.call_id || obj.output_index || order.length || '0');
+      toolFor(key).args += typeof obj.delta === 'string' ? obj.delta : '';
+      continue;
+    }
+    if (typ === 'response.function_call_arguments.done') {
+      const key = String(obj.item_id || obj.call_id || obj.output_index || order.length || '0');
+      if (typeof obj.arguments === 'string') toolFor(key).args = obj.arguments;
+      continue;
+    }
+    if (typ === 'response.output_item.added' || typ === 'response.output_item.done') {
+      captureResponsesItem(obj.item, toolFor, order.length);
+      continue;
+    }
+    if ((typ === 'response.completed' || typ === 'response.incomplete') && obj.response) {
+      captureResponsesObject(obj.response, msg, toolFor);
+    }
+  }
+
+  if (order.length > 0) {
+    msg.tool_calls = order.map((key) => {
+      const tb = tools.get(key)!;
+      return {
+        id: tb.id,
+        type: tb.type || 'function',
+        function: { name: tb.name || '', arguments: tb.args },
+      };
+    });
+  }
+  return msg.content || msg.tool_calls?.length ? [msg] : [];
+}
+
+function captureResponsesItem(
+  item: any,
+  toolFor: (key: string) => ToolCallBuilder,
+  fallbackIndex: number,
+) {
+  if (!item || typeof item !== 'object') return;
+  if (item.type !== 'function_call') return;
+  const key = String(item.id || item.call_id || fallbackIndex);
+  const tb = toolFor(key);
+  if (item.id || item.call_id) tb.id = item.id || item.call_id;
+  tb.type = 'function';
+  if (item.name) tb.name = String(item.name);
+  if (typeof item.arguments === 'string') tb.args = item.arguments;
+}
+
+function captureResponsesObject(resp: any, msg: Message, toolFor: (key: string) => ToolCallBuilder) {
+  if (!resp || typeof resp !== 'object') return;
+  if (!msg.content && typeof resp.output_text === 'string') {
+    msg.content = resp.output_text;
+  }
+  if (!Array.isArray(resp.output)) return;
+  const text: string[] = [];
+  for (const item of resp.output) {
+    if (item?.type === 'message' && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if ((part?.type === 'output_text' || part?.type === 'text') && typeof part.text === 'string') {
+          text.push(part.text);
+        }
+      }
+    } else {
+      captureResponsesItem(item, toolFor, 0);
+    }
+  }
+  if (!msg.content && text.length > 0) msg.content = text.join('\n');
+}
+
+function assembleAnthropicStream(frames: Array<{ event: string; obj: Record<string, any> }>): Message[] {
+  const msg: Message = { role: 'assistant', content: '' };
+  const parts = new Map<number, ContentPart>();
+  const order: number[] = [];
+  let fallbackIndex = 0;
+
+  const partFor = (idx: number): ContentPart => {
+    let part = parts.get(idx);
+    if (!part) {
+      part = { type: 'text', text: '' };
+      parts.set(idx, part);
+      order.push(idx);
+    }
+    return part;
+  };
+
+  for (const { event, obj } of frames) {
+    if (event === 'message_start' && obj.message?.role) {
+      msg.role = obj.message.role;
+      continue;
+    }
+    if (event === 'content_block_start') {
+      const idx = typeof obj.index === 'number' ? obj.index : fallbackIndex++;
+      const block = obj.content_block;
+      if (block?.type === 'tool_use') {
+        parts.set(idx, { type: 'tool_use', id: block.id, name: block.name, input: block.input ?? {} });
+        order.push(idx);
+      } else {
+        partFor(idx);
+      }
+      continue;
+    }
+    if (event === 'content_block_delta') {
+      const idx = typeof obj.index === 'number' ? obj.index : 0;
+      const delta = obj.delta;
+      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        const part = partFor(idx);
+        part.type = 'text';
+        part.text = (part.text || '') + delta.text;
+      } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        const part = partFor(idx);
+        part.type = 'tool_use';
+        part.input = String(part.input || '') + delta.partial_json;
+      }
+    }
+  }
+
+  const content = order
+    .map((idx) => parts.get(idx)!)
+    .filter((part) => part.type !== 'text' || !!part.text);
+  if (content.length === 0) return [];
+  msg.content = content.length === 1 && content[0].type === 'text' ? content[0].text || '' : content;
+  return [msg];
+}
+
 /**
  * Pull a flat list of "messages" out of either:
  *   - Request: OpenAI chat completions `{ messages: [...] }` or Anthropic Messages API request.
@@ -322,6 +513,8 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
 function extractMessages(p: ChatPayload | null, mode: 'request' | 'response'): Message[] {
   if (!p) return [];
   if (mode === 'request') {
+    const responsesReq = extractResponsesRequest(p);
+    if (responsesReq.length > 0) return responsesReq;
     if (Array.isArray(p.messages)) return p.messages;
     return [];
   }
@@ -335,7 +528,89 @@ function extractMessages(p: ChatPayload | null, mode: 'request' | 'response'): M
   if (p.role && (typeof p.content === 'string' || Array.isArray(p.content))) {
     return [{ role: p.role, content: p.content }];
   }
+  const responsesResp = extractResponsesResponse(p);
+  if (responsesResp.length > 0) return responsesResp;
   return [];
+}
+
+function extractResponsesRequest(p: ChatPayload): Message[] {
+  const out: Message[] = [];
+  const any = p as any;
+  if (typeof any.instructions === 'string' && any.instructions.trim()) {
+    out.push({ role: 'developer', content: any.instructions });
+  }
+  if (typeof any.input === 'string') {
+    out.push({ role: 'user', content: any.input });
+  } else if (Array.isArray(any.input)) {
+    for (const item of any.input) {
+      const msg = normalizeResponsesMessage(item);
+      if (msg) out.push(msg);
+    }
+  }
+  return out;
+}
+
+function extractResponsesResponse(p: ChatPayload): Message[] {
+  const any = p as any;
+  const msg: Message = { role: 'assistant', content: '' };
+  if (typeof any.output_text === 'string' && any.output_text) {
+    msg.content = any.output_text;
+  }
+  if (Array.isArray(any.output)) {
+    const content: ContentPart[] = [];
+    const toolCalls: ToolCall[] = [];
+    for (const item of any.output) {
+      if (item?.type === 'message') {
+        const m = normalizeResponsesMessage(item);
+        if (m) {
+          if (typeof m.content === 'string') content.push({ type: 'text', text: m.content });
+          else if (Array.isArray(m.content)) content.push(...m.content);
+        }
+      } else if (item?.type === 'function_call') {
+        toolCalls.push({
+          id: item.id || item.call_id,
+          type: 'function',
+          function: { name: item.name || '', arguments: item.arguments || '' },
+        });
+      }
+    }
+    if (!msg.content && content.length > 0) {
+      msg.content = content.length === 1 ? content[0].text || '' : content;
+    }
+    if (toolCalls.length > 0) msg.tool_calls = toolCalls;
+  }
+  return msg.content || msg.tool_calls?.length ? [msg] : [];
+}
+
+function normalizeResponsesMessage(item: any): Message | null {
+  if (!item || typeof item !== 'object') return null;
+  if (item.type !== 'message' && !item.role && !item.content) return null;
+  const role = item.role || (item.type === 'message' ? 'assistant' : 'user');
+  const content = normalizeResponsesContent(item.content);
+  return content == null ? null : { role, content };
+}
+
+function normalizeResponsesContent(content: any): Message['content'] | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  const parts: ContentPart[] = [];
+  for (const part of content) {
+    if (typeof part === 'string') {
+      parts.push({ type: 'text', text: part });
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+    if ((part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') && typeof part.text === 'string') {
+      parts.push({ type: 'text', text: part.text });
+    } else if (part.type === 'input_image' && part.image_url) {
+      parts.push({ type: 'image_url', image_url: part.image_url });
+    } else {
+      parts.push(part as ContentPart);
+    }
+  }
+  if (parts.length === 0) return null;
+  if (parts.length === 1 && parts[0].type === 'text') return parts[0].text || '';
+  return parts;
 }
 
 const ROLE_TINT: Record<string, string> = {
@@ -363,7 +638,7 @@ function MessageBubble({ m }: { m: Message }) {
         )}
       </div>
 
-      <ContentRenderer content={m.content} />
+      <ContentRenderer content={m.content} role={role} />
 
       {/* OpenAI: tool_calls on assistant messages */}
       {Array.isArray(m.tool_calls) && m.tool_calls.length > 0 && (
@@ -384,12 +659,12 @@ function MessageBubble({ m }: { m: Message }) {
   );
 }
 
-function ContentRenderer({ content }: { content: Message['content'] }) {
+function ContentRenderer({ content, role }: { content: Message['content']; role: string }) {
   if (content == null) return null;
 
   if (typeof content === 'string') {
     if (!content.trim()) return <span className="text-ink-4 italic text-[12.5px]">(empty)</span>;
-    return <TextBlock>{content}</TextBlock>;
+    return <TextBlock role={role}>{content}</TextBlock>;
   }
 
   // array of parts (multimodal / anthropic blocks)
@@ -467,21 +742,69 @@ const COLLAPSE_MIN_LINES = 8;
 const COLLAPSE_PREVIEW_CHARS = 600;
 const COLLAPSE_PREVIEW_LINES = 8;
 
-function TextBlock({ children }: { children: string }) {
+const MARKDOWN_ROLES = new Set(['user', 'assistant']);
+
+function TextBlock({ children, role }: { children: string; role?: string }) {
   const t = useT();
   const lineCount = children.split('\n').length;
   const needsCollapse = children.length > COLLAPSE_MIN_CHARS || lineCount > COLLAPSE_MIN_LINES;
   const [expanded, setExpanded] = useState(false);
+  const useMarkdown = !!role && MARKDOWN_ROLES.has(role);
+
+  const renderText = (text: string) => {
+    if (useMarkdown) {
+      return (
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            pre: ({ children }) => (
+              <pre className="codeblock !rounded-lg !max-h-[320px] my-1.5">{children}</pre>
+            ),
+            code: ({ children, className, ...props }) => {
+              const isBlock = className?.includes('language-');
+              return isBlock ? (
+                <code className={className} {...props}>{children}</code>
+              ) : (
+                <code className="px-1 py-0.5 rounded bg-black/5 text-[12.5px] font-mono" {...props}>{children}</code>
+              );
+            },
+            p: ({ children }) => <p className="mb-1.5 last:mb-0">{children}</p>,
+            ul: ({ children }) => <ul className="list-disc pl-5 mb-1.5 space-y-0.5">{children}</ul>,
+            ol: ({ children }) => <ol className="list-decimal pl-5 mb-1.5 space-y-0.5">{children}</ol>,
+            blockquote: ({ children }) => (
+              <blockquote className="border-l-3 border-current/20 pl-3 my-1.5 opacity-85">{children}</blockquote>
+            ),
+            h1: ({ children }) => <h1 className="text-lg font-bold mb-1.5">{children}</h1>,
+            h2: ({ children }) => <h2 className="text-base font-bold mb-1">{children}</h2>,
+            h3: ({ children }) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
+            table: ({ children }) => (
+              <div className="overflow-x-auto my-1.5">
+                <table className="text-[12px] border-collapse border border-black/10">{children}</table>
+              </div>
+            ),
+            th: ({ children }) => (
+              <th className="border border-black/10 px-2 py-1 bg-black/5 font-semibold text-left">{children}</th>
+            ),
+            td: ({ children }) => (
+              <td className="border border-black/10 px-2 py-1">{children}</td>
+            ),
+          }}
+        >
+          {text}
+        </Markdown>
+      );
+    }
+    return <>{text}</>;
+  };
 
   if (!needsCollapse) {
     return (
-      <div className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
-        {children}
+      <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap')}>
+        {renderText(children)}
       </div>
     );
   }
 
-  // Preview = whichever cap kicks in first: char limit or line limit.
   const lines = children.split('\n');
   const byLines = lines.slice(0, COLLAPSE_PREVIEW_LINES).join('\n');
   const byChars = children.slice(0, COLLAPSE_PREVIEW_CHARS);
@@ -489,8 +812,8 @@ function TextBlock({ children }: { children: string }) {
   const remaining = children.length - preview.length;
 
   return (
-    <div className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
-      {expanded ? children : preview}
+    <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap')}>
+      {renderText(expanded ? children : preview)}
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}

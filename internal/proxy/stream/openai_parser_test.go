@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,40 @@ func TestOpenAIParserStreamMarksTimelineForToolCallOnly(t *testing.T) {
 	}
 }
 
+func TestOpenAIParserResponsesStreamCollectsTextAndUsage(t *testing.T) {
+	body := "" +
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","status":"in_progress"}}` + "\n\n" +
+		`data: {"type":"response.output_text.delta","delta":"Hel","output_index":0,"content_index":0}` + "\n\n" +
+		`data: {"type":"response.output_text.delta","delta":"lo","output_index":0,"content_index":0}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":1}}}}` + "\n\n"
+
+	p := NewOpenAIParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	var firstTokenAt time.Time
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) { firstTokenAt = ts })
+	ev := &Event{}
+	p.Finalize(ev)
+
+	if ev.ResponseText != "Hello" {
+		t.Fatalf("text: %q", ev.ResponseText)
+	}
+	if ev.Model != "gpt-5.5" {
+		t.Fatalf("model: %q", ev.Model)
+	}
+	if ev.InputTokens != 6 || ev.CachedInputTokens != 4 || ev.OutputTokens != 2 || ev.TotalTokens != 12 {
+		t.Fatalf("usage: in=%d cached=%d out=%d total=%d", ev.InputTokens, ev.CachedInputTokens, ev.OutputTokens, ev.TotalTokens)
+	}
+	if ev.ReasoningTokens != 1 {
+		t.Fatalf("reasoning: %d", ev.ReasoningTokens)
+	}
+	if ev.FinishReason != "completed" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+	if firstTokenAt.IsZero() || tl.LastToken.IsZero() {
+		t.Fatal("responses stream did not stamp token timeline")
+	}
+}
+
 func TestOpenAIParserNonStream(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","choices":[{"message":{"content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
 	p := NewOpenAIParser()
@@ -78,6 +113,37 @@ func TestOpenAIParserNonStream(t *testing.T) {
 	}
 	if ev.Model != "gpt-4o" || ev.OutputTokens != 1 || ev.FinishReason != "stop" {
 		t.Fatalf("unexpected event: %+v", ev)
+	}
+}
+
+func TestOpenAIParserResponsesNonStream(t *testing.T) {
+	body := []byte(`{"object":"response","id":"resp_1","model":"gpt-5.5","status":"completed",
+		"output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}],
+		"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10,
+			"input_tokens_details":{"cached_tokens":3},
+			"output_tokens_details":{"reasoning_tokens":1}}}`)
+	p := NewOpenAIParser()
+	ev := &Event{}
+	p.ParseNonStream(body, ev)
+	if ev.ResponseText != "Hi" {
+		t.Fatalf("text: %q", ev.ResponseText)
+	}
+	if ev.Model != "gpt-5.5" || ev.InputTokens != 5 || ev.CachedInputTokens != 3 ||
+		ev.OutputTokens != 2 || ev.TotalTokens != 10 || ev.ReasoningTokens != 1 {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+	if ev.FinishReason != "completed" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+}
+
+func TestNewParserForURLUsesAnthropicCompatiblePath(t *testing.T) {
+	u, err := url.Parse("https://open.bigmodel.cn/api/anthropic/v1/messages?beta=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := NewParserForURL(u).(*AnthropicParser); !ok {
+		t.Fatalf("parser = %T, want *AnthropicParser", NewParserForURL(u))
 	}
 }
 
@@ -106,6 +172,34 @@ func TestAnthropicParserStream(t *testing.T) {
 		t.Fatalf("usage: in=%d out=%d", ev.InputTokens, ev.OutputTokens)
 	}
 	if ev.FinishReason != "end_turn" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+}
+
+func TestAnthropicParserToolUseOnlyStillCountsAsStreamActivity(t *testing.T) {
+	body := "" +
+		"event: message_start\ndata: {\"message\":{\"model\":\"claude-3-5-sonnet\"}}\n\n" +
+		"event: content_block_start\ndata: {\"content_block\":{\"type\":\"thinking\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"planning\"}}\n\n" +
+		"event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":1}\"}}\n\n" +
+		"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+		"event: message_stop\ndata: {}\n\n"
+
+	p := NewAnthropicParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	var firstTokenAt time.Time
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) { firstTokenAt = ts })
+	ev := &Event{}
+	p.Finalize(ev)
+
+	if firstTokenAt.IsZero() {
+		t.Fatal("FirstToken not stamped")
+	}
+	if tl.LastToken.IsZero() {
+		t.Fatal("LastToken not stamped")
+	}
+	if ev.FinishReason != "tool_use" {
 		t.Fatalf("finish: %q", ev.FinishReason)
 	}
 }

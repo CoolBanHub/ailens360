@@ -240,7 +240,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	parser := stream.NewParserForHost(upstreamURL.Host)
+	parser := stream.NewParserForURL(upstreamURL)
 	contentType := resp.Header.Get("Content-Type")
 	streaming := isStream || strings.Contains(strings.ToLower(contentType), "text/event-stream")
 

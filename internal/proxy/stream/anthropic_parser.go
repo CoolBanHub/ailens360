@@ -41,10 +41,18 @@ type anthMessageStart struct {
 	} `json:"message"`
 }
 
+type anthContentStart struct {
+	ContentBlock struct {
+		Type string `json:"type"`
+	} `json:"content_block"`
+}
+
 type anthContentDelta struct {
 	Delta struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 }
 
@@ -93,15 +101,31 @@ func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken
 				p.usageSeen = true
 			}
 		}
+	case "content_block_start":
+		var m anthContentStart
+		if err := json.Unmarshal(ev.Data, &m); err == nil && isAnthropicGeneratedBlock(m.ContentBlock.Type) {
+			p.markGenerated(now, onFirstToken, tl)
+		}
 	case "content_block_delta":
 		var d anthContentDelta
-		if err := json.Unmarshal(ev.Data, &d); err == nil && d.Delta.Text != "" {
-			if p.textBuilder.Len() == 0 && onFirstToken != nil {
-				onFirstToken(now)
-				tl.FirstToken = now
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			return
+		}
+		switch d.Delta.Type {
+		case "text_delta":
+			if d.Delta.Text == "" {
+				return
 			}
+			p.markGenerated(now, onFirstToken, tl)
 			p.textBuilder.WriteString(d.Delta.Text)
-			tl.LastToken = now
+		case "thinking_delta":
+			if d.Delta.Thinking != "" {
+				p.markGenerated(now, onFirstToken, tl)
+			}
+		case "input_json_delta":
+			if d.Delta.PartialJSON != "" {
+				p.markGenerated(now, onFirstToken, tl)
+			}
 		}
 	case "message_delta":
 		var m anthMessageDelta
@@ -120,6 +144,25 @@ func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken
 				p.cacheCreateToks = m.Usage.CacheCreationInputTokens
 			}
 		}
+	}
+}
+
+func (p *AnthropicParser) markGenerated(now time.Time, onFirstToken func(time.Time), tl *Timeline) {
+	if tl.FirstToken.IsZero() {
+		if onFirstToken != nil {
+			onFirstToken(now)
+		}
+		tl.FirstToken = now
+	}
+	tl.LastToken = now
+}
+
+func isAnthropicGeneratedBlock(typ string) bool {
+	switch typ {
+	case "text", "thinking", "tool_use", "server_tool_use", "web_search_tool_result":
+		return true
+	default:
+		return false
 	}
 }
 

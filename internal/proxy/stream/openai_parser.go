@@ -64,6 +64,18 @@ type openaiChunk struct {
 	Usage *openaiUsage `json:"usage"`
 }
 
+type responsesUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+	OutputTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
+}
+
 type openaiUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
@@ -97,7 +109,25 @@ func (u *openaiUsage) reasoningTokens() int {
 	return 0
 }
 
+func (u *responsesUsage) cachedTokens() int {
+	if u != nil && u.InputTokensDetails != nil {
+		return u.InputTokensDetails.CachedTokens
+	}
+	return 0
+}
+
+func (u *responsesUsage) reasoningTokens() int {
+	if u != nil && u.OutputTokensDetails != nil {
+		return u.OutputTokensDetails.ReasoningTokens
+	}
+	return 0
+}
+
 func (p *OpenAIParser) handleChunk(data []byte, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
+	if p.handleResponsesChunk(data, now, onFirstToken, tl) {
+		return
+	}
+
 	var c openaiChunk
 	if err := json.Unmarshal(data, &c); err != nil {
 		// keep going; the chunk count was already bumped by the caller.
@@ -135,13 +165,136 @@ func (p *OpenAIParser) handleChunk(data []byte, now time.Time, onFirstToken func
 		tl.LastToken = now
 	}
 	if c.Usage != nil {
-		p.totalIn = c.Usage.PromptTokens
-		p.totalOut = c.Usage.CompletionTokens
-		p.totalAll = c.Usage.TotalTokens
-		p.cachedInToks = c.Usage.cachedTokens()
-		p.reasoningToks = c.Usage.reasoningTokens()
-		p.tokensFromUsage = true
+		p.setOpenAIUsage(c.Usage)
 	}
+}
+
+func (p *OpenAIParser) handleResponsesChunk(data []byte, now time.Time, onFirstToken func(time.Time), tl *Timeline) bool {
+	var ev struct {
+		Type         string          `json:"type"`
+		Delta        string          `json:"delta"`
+		Text         string          `json:"text"`
+		Sequence     int             `json:"sequence_number"`
+		Response     json.RawMessage `json:"response"`
+		Item         json.RawMessage `json:"item"`
+		Usage        *responsesUsage `json:"usage"`
+		OutputIndex  int             `json:"output_index"`
+		ContentIndex int             `json:"content_index"`
+	}
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return false
+	}
+	if !strings.HasPrefix(ev.Type, "response.") {
+		return false
+	}
+
+	switch ev.Type {
+	case "response.output_text.delta", "response.refusal.delta":
+		p.appendResponsesDelta(ev.Delta, now, onFirstToken, tl)
+	case "response.output_item.added":
+		if p.captureResponsesItem(ev.Item, now, onFirstToken, tl) {
+			return true
+		}
+	case "response.completed", "response.incomplete":
+		p.captureResponsesObject(ev.Response)
+	default:
+		if ev.Usage != nil {
+			p.setResponsesUsage(ev.Usage)
+		}
+		if ev.Text != "" && strings.HasSuffix(ev.Type, ".done") {
+			p.appendResponsesDelta(ev.Text, now, onFirstToken, tl)
+		}
+	}
+	return true
+}
+
+func (p *OpenAIParser) appendResponsesDelta(delta string, now time.Time, onFirstToken func(time.Time), tl *Timeline) {
+	if delta == "" {
+		return
+	}
+	p.textBuilder.WriteString(delta)
+	if tl.FirstToken.IsZero() {
+		if onFirstToken != nil {
+			onFirstToken(now)
+		}
+		tl.FirstToken = now
+	}
+	tl.LastToken = now
+}
+
+func (p *OpenAIParser) captureResponsesItem(raw json.RawMessage, now time.Time, onFirstToken func(time.Time), tl *Timeline) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var item struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return false
+	}
+	if item.Type != "function_call" && item.Type != "web_search_call" && item.Type != "file_search_call" &&
+		item.Type != "computer_call" && item.Type != "mcp_call" && item.Type != "code_interpreter_call" {
+		return false
+	}
+	if tl.FirstToken.IsZero() {
+		if onFirstToken != nil {
+			onFirstToken(now)
+		}
+		tl.FirstToken = now
+	}
+	tl.LastToken = now
+	return true
+}
+
+func (p *OpenAIParser) captureResponsesObject(raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var resp struct {
+		Model             string          `json:"model"`
+		OutputText        string          `json:"output_text"`
+		Status            string          `json:"status"`
+		Usage             *responsesUsage `json:"usage"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return
+	}
+	if resp.Model != "" && p.model == "" {
+		p.model = resp.Model
+	}
+	if resp.OutputText != "" && p.textBuilder.Len() == 0 {
+		p.textBuilder.WriteString(resp.OutputText)
+	}
+	if resp.Status != "" {
+		p.finishReason = resp.Status
+	}
+	if resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason != "" {
+		p.finishReason = resp.IncompleteDetails.Reason
+	}
+	if resp.Usage != nil {
+		p.setResponsesUsage(resp.Usage)
+	}
+}
+
+func (p *OpenAIParser) setOpenAIUsage(u *openaiUsage) {
+	p.totalIn = u.PromptTokens
+	p.totalOut = u.CompletionTokens
+	p.totalAll = u.TotalTokens
+	p.cachedInToks = u.cachedTokens()
+	p.reasoningToks = u.reasoningTokens()
+	p.tokensFromUsage = true
+}
+
+func (p *OpenAIParser) setResponsesUsage(u *responsesUsage) {
+	p.totalIn = u.InputTokens
+	p.totalOut = u.OutputTokens
+	p.totalAll = u.TotalTokens
+	p.cachedInToks = u.cachedTokens()
+	p.reasoningToks = u.reasoningTokens()
+	p.tokensFromUsage = true
 }
 
 // Finalize collects the parsing result into the given Event.
@@ -171,6 +324,10 @@ func (p *OpenAIParser) Finalize(ev *Event) {
 
 // ParseNonStream parses a single JSON body (non-stream) for OpenAI chat.completions / embeddings.
 func (p *OpenAIParser) ParseNonStream(body []byte, ev *Event) {
+	if p.parseResponsesNonStream(body, ev) {
+		return
+	}
+
 	var resp struct {
 		Model   string `json:"model"`
 		Choices []struct {
@@ -204,4 +361,66 @@ func (p *OpenAIParser) ParseNonStream(body []byte, ev *Event) {
 		ev.ReasoningTokens = resp.Usage.reasoningTokens()
 		ev.TokensEstimated = false
 	}
+}
+
+func (p *OpenAIParser) parseResponsesNonStream(body []byte, ev *Event) bool {
+	var resp struct {
+		Object     string          `json:"object"`
+		ID         string          `json:"id"`
+		Model      string          `json:"model"`
+		OutputText string          `json:"output_text"`
+		Status     string          `json:"status"`
+		Usage      *responsesUsage `json:"usage"`
+		Output     []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false
+	}
+	if resp.Object != "response" && !strings.HasPrefix(resp.ID, "resp_") && resp.OutputText == "" && len(resp.Output) == 0 {
+		return false
+	}
+	if resp.Model != "" && ev.Model == "" {
+		ev.Model = resp.Model
+	}
+	if resp.OutputText != "" {
+		ev.ResponseText = resp.OutputText
+	} else {
+		var sb strings.Builder
+		for _, out := range resp.Output {
+			if out.Type != "message" {
+				continue
+			}
+			for _, c := range out.Content {
+				if c.Type == "output_text" || c.Type == "text" {
+					sb.WriteString(c.Text)
+				}
+			}
+		}
+		ev.ResponseText = sb.String()
+	}
+	if resp.Status != "" {
+		ev.FinishReason = resp.Status
+	}
+	if resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason != "" {
+		ev.FinishReason = resp.IncompleteDetails.Reason
+	}
+	if resp.Usage != nil {
+		cached := resp.Usage.cachedTokens()
+		ev.InputTokens = max(resp.Usage.InputTokens-cached, 0)
+		ev.OutputTokens = resp.Usage.OutputTokens
+		ev.TotalTokens = resp.Usage.TotalTokens
+		ev.CachedInputTokens = cached
+		ev.ReasoningTokens = resp.Usage.reasoningTokens()
+		ev.TokensEstimated = false
+	}
+	return true
 }

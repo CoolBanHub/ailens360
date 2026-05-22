@@ -2,6 +2,7 @@ package stream
 
 import (
 	"io"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -19,6 +20,25 @@ type Parser interface {
 
 	// ParseNonStream populates the event from a complete (non-streaming) response body.
 	ParseNonStream(body []byte, ev *Event)
+}
+
+// NewParserForURL returns the right Parser for an upstream URL. Only the wire
+// format matters here; many gateways expose Anthropic-compatible endpoints
+// under non-Anthropic hosts, so path inspection is part of routing.
+func NewParserForURL(u *url.URL) Parser {
+	if u == nil {
+		return NewOpenAIParser()
+	}
+	h := strings.ToLower(u.Host)
+	p := strings.ToLower(u.EscapedPath())
+	switch {
+	case strings.Contains(h, "anthropic"), strings.Contains(p, "anthropic"), strings.HasSuffix(p, "/v1/messages"):
+		return NewAnthropicParser()
+	case strings.Contains(h, "googleapis"), strings.Contains(h, "generativelanguage"):
+		return NewGeminiParser()
+	default:
+		return NewOpenAIParser()
+	}
 }
 
 // NewParserForHost returns the right Parser for an upstream host. Only the SSE
