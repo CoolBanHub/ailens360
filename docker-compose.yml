@@ -73,17 +73,7 @@ services:
   # Collector owns schema migrations and partition maintenance, so api / proxy
   # depend on it being healthy before they bind.
   collector:
-    build: &build-app
-      context: .
-      dockerfile: deploy/docker/Dockerfile
-      args:
-        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
-        GOSUMDB: ${GOSUMDB:-sum.golang.org}
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        ALL_PROXY: ${ALL_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-    image: ailens360/ailens360:latest
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}
     container_name: ailens360-collector
     command: ["collector"]
     restart: unless-stopped
@@ -101,8 +91,7 @@ services:
       retries: 10
 
   proxy:
-    build: *build-app
-    image: ailens360/ailens360:latest
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}
     container_name: ailens360-proxy
     command: ["proxy"]
     restart: unless-stopped
@@ -114,10 +103,14 @@ services:
       <<: *app-env
       AILENS360_PROXY_ADDR: 0.0.0.0:8080
       AILENS360_PROXY_PUBLIC_URL: ${AILENS360_PROXY_PUBLIC_URL:-}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   api:
-    build: *build-app
-    image: ailens360/ailens360:latest
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}
     container_name: ailens360-api
     command: ["api"]
     restart: unless-stopped
@@ -133,6 +126,11 @@ services:
       AILENS360_AUTH_PASSWORD: ${AILENS360_AUTH_PASSWORD:-admin}
       # Required: openssl rand -hex 32
       AILENS360_JWT_SECRET: ${AILENS360_JWT_SECRET:?set AILENS360_JWT_SECRET in .env (openssl rand -hex 32)}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   ailens-pg:

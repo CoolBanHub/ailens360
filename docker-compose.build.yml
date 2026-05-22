@@ -1,0 +1,21 @@
+services:
+  collector:
+    build: &build-app
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.org}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}
+
+  proxy:
+    build: *build-app
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}
+
+  api:
+    build: *build-app
+    image: ${AILENS360_IMAGE:-coolbanhub/ailens360:latest}

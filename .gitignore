@@ -61,7 +61,7 @@ pnpm-debug.log*
 .idea
 deploy.sh
 deploy-frontend.sh
-
+/release.md
 # Server-specific deployment files (keep local, don't commit)
 deploy/docker-compose.deps.yml
 deploy/supervisor-ailens360.ini

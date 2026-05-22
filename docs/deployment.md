@@ -184,15 +184,22 @@ cat > .env <<EOF
 AILENS360_AUTH_PASSWORD=$(openssl rand -base64 24)
 AILENS360_JWT_SECRET=$(openssl rand -hex 32)
 EOF
-docker compose up -d --build
+docker compose up -d
 docker compose logs -f
 ```
 
-或在仓库根目录直接：
-
 ```bash
-make docker-up       # 等价于 docker compose -f docker-compose.deps.yml up -d
+# 全栈 compose（发布镜像）
+make docker-up
 make docker-down
+
+# 全栈 compose（本地源码构建）
+make docker-build-up
+make docker-build-down
+
+# 仅依赖（开发模式）
+make docker-deps-up
+make docker-deps-down
 ```
 
 `docker-compose.yml` 已经把三个角色（proxy / collector / api）和 MinIO 全部配好：proxy 暴露 `:8080`、api 暴露 `:8081`、MinIO `:9000` + console `:9001`，collector 只在内部网络。

@@ -60,7 +60,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -o /out/ailens360 ./cmd/ailens360
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata wget && \
     addgroup -S ailens && adduser -S -G ailens ailens
 
 WORKDIR /app

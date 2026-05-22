@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/version.Version=$(VER) \
            -X $(PKG)/internal/version.Commit=$(GIT_SHA) \
            -X $(PKG)/internal/version.BuildTime=$(DATE)
 
-.PHONY: dev build run run-proxy run-collector run-api test lint tidy clean docker docker-up docker-down
+.PHONY: dev build run run-proxy run-collector run-api test lint tidy clean docker docker-up docker-down docker-build-up docker-build-down docker-deps-up docker-deps-down
 
 dev: run
 
@@ -53,12 +53,24 @@ docker:
 	  --build-arg VERSION=$(VER) \
 	  --build-arg COMMIT=$(GIT_SHA) \
 	  --build-arg BUILD_TIME=$(DATE) \
-	  -t ailens360/ailens360:$(VER) \
-	  -t ailens360/ailens360:latest \
+	  -t coolbanhub/ailens360:$(VER) \
+	  -t coolbanhub/ailens360:latest \
 	  -f deploy/docker/Dockerfile .
 
 docker-up:
-	docker compose -f docker-compose.deps.yml up -d
+	docker compose up -d
 
 docker-down:
+	docker compose down
+
+docker-build-up:
+	docker compose up -d --build
+
+docker-build-down:
+	docker compose -f docker-compose.yml -f docker-compose.build.yml down
+
+docker-deps-up:
+	docker compose -f docker-compose.deps.yml up -d
+
+docker-deps-down:
 	docker compose -f docker-compose.deps.yml down
