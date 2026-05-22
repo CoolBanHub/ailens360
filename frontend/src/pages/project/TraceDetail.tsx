@@ -485,6 +485,13 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
           </InlineMetricNode>
           <InlineMetric label={tt('detail.tile.cost')}     value={fmtCostFine(t.CostUSD)} />
         </div>
+
+        {t.ErrorMessage && (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="text-[11px] font-semibold text-amber-700">{tt('detail.section.errorReason')}</div>
+            <div className="mt-1 text-[12px] text-amber-900 break-words">{t.ErrorMessage}</div>
+          </div>
+        )}
       </section>
 
       {/* ── Request + Response (the meat) ────────────────────────── */}
@@ -596,4 +603,3 @@ function TimelineBlock({ raw, title }: { raw: string; title?: string }) {
     </>
   );
 }
-

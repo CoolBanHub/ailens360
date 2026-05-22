@@ -279,7 +279,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		writers = append(writers, pw)
 	}
 	mw := io.MultiWriter(writers...)
+	var copyErr error
 	if _, err := io.Copy(mw, resp.Body); err != nil {
+		copyErr = err
 		h.logger.Warn("response copy interrupted", "err", err, "trace_id", traceID)
 	}
 	if pw != nil {
@@ -344,9 +346,18 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		ev.Status = "success"
 		ev.StreamStatus = "completed"
 	}
-	if streaming && tl.LastToken.IsZero() && statusCode < 400 {
+	if streaming && statusCode < 400 && copyErr != nil {
 		ev.StreamStatus = "aborted"
 		ev.Status = "aborted"
+		ev.ErrorMsg = "response stream interrupted: " + copyErr.Error()
+	} else if streaming && statusCode < 400 && ev.FinishReason == "" && tl.LastToken.IsZero() {
+		ev.StreamStatus = "aborted"
+		ev.Status = "aborted"
+		ev.ErrorMsg = "response stream ended before any generated event or terminal event was observed"
+	} else if streaming && statusCode < 400 && ev.FinishReason == "" {
+		ev.StreamStatus = "aborted"
+		ev.Status = "aborted"
+		ev.ErrorMsg = "response stream ended without a terminal event"
 	}
 
 	h.sink.Submit(ev)

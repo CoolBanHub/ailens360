@@ -189,9 +189,49 @@ func TestServeAcceptsQueryProjectKeyAndStripsItFromUpstream(t *testing.T) {
 	}
 }
 
+func TestServeDoesNotMarkCompletedResponsesStreamAborted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"model":"gpt-5.5","status":"in_progress"}}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	sink := &captureSink{}
+	h := newTestHandlerWithSink("sk-test", sink)
+	req := httptest.NewRequest(http.MethodPost, "/"+upstream.URL+"/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true}`))
+	req.Header.Set("X-AILens-Project-Key", "sk-test")
+	rec := httptest.NewRecorder()
+
+	h.serve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if sink.ev == nil {
+		t.Fatal("no event submitted")
+	}
+	if sink.ev.Status != "success" || sink.ev.StreamStatus != "completed" {
+		t.Fatalf("event status = %s/%s, want success/completed; err=%q", sink.ev.Status, sink.ev.StreamStatus, sink.ev.ErrorMsg)
+	}
+	if sink.ev.FinishReason != "completed" {
+		t.Fatalf("finish_reason = %q, want completed", sink.ev.FinishReason)
+	}
+	if sink.ev.ErrorMsg != "" {
+		t.Fatalf("error msg = %q, want empty", sink.ev.ErrorMsg)
+	}
+}
+
 type noopSink struct{}
 
 func (noopSink) Submit(*stream.Event) {}
+
+type captureSink struct {
+	ev *stream.Event
+}
+
+func (s *captureSink) Submit(ev *stream.Event) { s.ev = ev }
 
 type noopStore struct{}
 
@@ -217,12 +257,16 @@ func (discardUploader) Close() error                { return nil }
 func (discardUploader) BytesWritten() int64         { return 0 }
 
 func newTestHandler(projectKey string) *Handler {
+	return newTestHandlerWithSink(projectKey, noopSink{})
+}
+
+func newTestHandlerWithSink(projectKey string, sink Submitter) *Handler {
 	return NewHandler(Deps{
 		Resolver: project.NewResolver(
 			&proxyProjectRepo{project: &repo.Project{ID: "prj_1", ProjectKey: projectKey}},
 			&proxyProjectCache{project: &repo.Project{ID: "prj_1", ProjectKey: projectKey}},
 		),
-		Sink:      noopSink{},
+		Sink:      sink,
 		BodyStore: noopStore{},
 		RawLimit:  1024,
 		MaxBody:   1024,
