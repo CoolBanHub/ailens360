@@ -20,7 +20,8 @@
 git clone https://github.com/CoolBanHub/ailens360.git
 cd ailens360
 
-cp .env.example .env       # 填好 AILENS360_JWT_SECRET / DB_DSN / REDIS_ADDR / BODY_STORE_*
+docker compose -f docker-compose.deps.yml up -d
+cp .env.example .env       # 填好 AILENS360_JWT_SECRET；DB/Redis/MinIO 可用模板默认值
 go mod download
 make build                 # → ./bin/ailens360
 make run                   # 同时启三个进程：proxy(:8080) collector(:8082) api(:8081)

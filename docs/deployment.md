@@ -8,20 +8,93 @@
 
 | 模式 | 适用规模 | 依赖 | 维护成本 |
 |---|---|---|---|
-| **A. 二进制 + systemd + 外置依赖** | 个人 / 小团队 | Postgres + Redis + MinIO | ★★ |
-| **B. Docker Compose（推荐）** | 小团队 / 单机一键起 | Docker / Compose | ★ |
+| **A. Docker Compose（推荐）** | 小团队 / 单机一键起 | Docker / Compose | ★ |
+| **B. 二进制 + systemd + 外置依赖** | 个人 / 小团队 | Postgres + Redis + MinIO | ★★ |
 | **C. 多副本（同一 Compose 网络）** | 中等规模 / 单机 LB | Compose + LB | ★★ |
 | **D. Kubernetes** | 多节点 / 高可用 | K8s + 外置 DB | ★★★ |
 
-> 默认开发流程：`docker compose -f docker-compose.deps.yml up -d` 只起 **Postgres + Redis + MinIO** 三个依赖；
-> 应用本身通过 `make build && make run` 在宿主机直接跑（便于调试 / 热改）。
-> 生产环境再视情况把应用容器化（Dockerfile 已就绪）；扩副本时把每个 role 多起几份 + 前置 LB 即可。
+> 默认部署流程：`docker compose up -d` 直接拉 Docker Hub 镜像 `coolbanhub/ailens360:latest`，并启动应用三进程及依赖。
+> 默认开发流程：`docker compose -f docker-compose.deps.yml up -d` 只起 **Postgres + Redis + MinIO**，应用通过 `make run` 在宿主机跑。
 
 ---
 
-## 二、模式 A：二进制 + systemd
+## 二、模式 A：Docker Compose（推荐）
 
-### 2.1 三个进程角色
+仓库根目录提供三份 compose 文件：
+
+| 文件 | 内容 | 适用场景 |
+|---|---|---|
+| `docker-compose.yml` | 三个应用进程 + Postgres + Redis + MinIO | 一台服务器一键自部署；默认拉发布镜像 |
+| `docker-compose.build.yml` | 给应用服务补充 `build` 配置 | 从当前源码构建镜像再启动 |
+| `docker-compose.deps.yml` | Postgres + Redis + MinIO | 本地开发：依赖跑容器、应用 `make run` 在宿主机跑 |
+
+### 2.1 全栈启动
+
+```bash
+cat > .env <<EOF
+AILENS360_AUTH_USERNAME=admin
+AILENS360_AUTH_PASSWORD=$(openssl rand -base64 24)
+AILENS360_JWT_SECRET=$(openssl rand -hex 32)
+EOF
+
+docker compose up -d
+docker compose ps
+```
+
+默认镜像是 `coolbanhub/ailens360:latest`。如果要固定版本，在 `.env` 中加：
+
+```bash
+AILENS360_IMAGE=coolbanhub/ailens360:0.0.1
+```
+
+访问：
+
+- 控制台：`http://localhost:8081/`
+- 代理入口：`http://localhost:8080/`
+- MinIO API：`http://localhost:9000/`
+- MinIO Console：`http://localhost:9001/`
+
+检查：
+
+```bash
+curl http://localhost:8080/healthz   # proxy
+curl http://localhost:8081/healthz   # api
+```
+
+### 2.2 常用命令
+
+```bash
+# 全栈 compose（发布镜像）
+make docker-up
+make docker-down
+
+# 全栈 compose（本地源码构建）
+make docker-build-up
+make docker-build-down
+
+# 仅依赖（开发模式）
+make docker-deps-up
+make docker-deps-down
+```
+
+`docker-compose.yml` 已经把三个角色（proxy / collector / api）和 MinIO 全部配好：proxy 暴露 `:8080`、api 暴露 `:8081`、MinIO `:9000` + console `:9001`，collector 只在内部网络。
+
+### 2.3 发布镜像
+
+GitHub Actions 会在推送 `v*` tag 时构建并发布多架构镜像：
+
+- Docker Hub：`coolbanhub/ailens360:<version>` 和 `coolbanhub/ailens360:latest`
+- GHCR：`ghcr.io/coolbanhub/ailens360:<version>` 和 `ghcr.io/coolbanhub/ailens360:latest`
+
+例如 `v0.0.1` 会发布 `coolbanhub/ailens360:0.0.1`。发布前需要在 GitHub 仓库 Secrets 配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
+
+---
+
+## 三、模式 B：二进制 + systemd
+
+当前仓库没有发布二进制附件，需要从源码构建。
+
+### 3.1 三个进程角色
 
 | Role | 命令 | 端口 | 职责 |
 |---|---|---|---|
@@ -29,7 +102,7 @@
 | **collector** | `ailens360 collector` | `:8082` (健康检查) | XREADGROUP 消费 + 入库 + 分区维护；**owns migrations** |
 | **api** | `ailens360 api` | `:8081` | REST 控制台 + 静态 UI + pricing refresher |
 
-### 2.2 构建
+### 3.2 构建
 
 ```bash
 git clone https://github.com/CoolBanHub/ailens360.git
@@ -45,7 +118,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 > 二进制无 CGO 依赖，可直接拷到任意 Linux 主机运行。
 
-### 2.3 目录与配置
+### 3.3 目录与配置
 
 ```bash
 sudo mkdir -p /opt/ailens360/{bin,data}
@@ -73,7 +146,7 @@ sudo chmod 600 /opt/ailens360/.env
 
 > Validate 是 role-aware 的：proxy 与 collector 不需要 `AILENS360_JWT_SECRET`，留空也能起。
 
-### 2.4 前台验证
+### 3.4 前台验证
 
 ```bash
 cd /opt/ailens360
@@ -92,7 +165,7 @@ curl http://localhost:8081/healthz   # api
 curl http://localhost:8082/healthz   # collector
 ```
 
-### 2.5 systemd 三个 unit
+### 3.5 systemd 三个 unit
 
 `/etc/systemd/system/ailens360-collector.service`：
 
@@ -153,7 +226,7 @@ sudo systemctl status 'ailens360-*'
 sudo journalctl -u ailens360-proxy -f
 ```
 
-### 2.6 升级与回滚
+### 3.6 升级与回滚
 
 ```bash
 # 升级：替换二进制后重启三个进程，collector 启动时会跑新迁移
@@ -163,46 +236,6 @@ sudo systemctl start ailens360-collector ailens360-proxy ailens360-api
 ```
 
 > 跨越破坏性迁移的回滚不安全；如有 `down.sql` 不可逆字段（如 DROP COLUMN），建议先在 Postgres 侧打快照、再降级。
-
----
-
-## 三、模式 B：Docker Compose（推荐）
-
-仓库根目录提供两份 compose 文件：
-
-| 文件 | 内容 | 适用场景 |
-|---|---|---|
-| `docker-compose.deps.yml` | Postgres + Redis + MinIO | 本地开发：依赖跑容器、应用 `make run` 在宿主机跑 |
-| `docker-compose.yml` | 三个应用进程 + Postgres + Redis + MinIO | 一台服务器一键自部署 |
-
-```bash
-# 仅依赖（应用本机跑）
-docker compose -f docker-compose.deps.yml up -d
-
-# 全栈一键起：先写 .env（AILENS360_JWT_SECRET 必填）
-cat > .env <<EOF
-AILENS360_AUTH_PASSWORD=$(openssl rand -base64 24)
-AILENS360_JWT_SECRET=$(openssl rand -hex 32)
-EOF
-docker compose up -d
-docker compose logs -f
-```
-
-```bash
-# 全栈 compose（发布镜像）
-make docker-up
-make docker-down
-
-# 全栈 compose（本地源码构建）
-make docker-build-up
-make docker-build-down
-
-# 仅依赖（开发模式）
-make docker-deps-up
-make docker-deps-down
-```
-
-`docker-compose.yml` 已经把三个角色（proxy / collector / api）和 MinIO 全部配好：proxy 暴露 `:8080`、api 暴露 `:8081`、MinIO `:9000` + console `:9001`，collector 只在内部网络。
 
 ---
 

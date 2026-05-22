@@ -4,7 +4,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [getting-started.md](./getting-started.md) | 5 分钟跑通：起三个进程 → 登录控制台 → 创建 Project → 发起调用 → 看 trace |
+| [getting-started.md](./getting-started.md) | 5 分钟跑通：启动全栈 → 登录控制台 → 创建 Project → 发起调用 → 看 trace |
 | [deployment.md](./deployment.md) | 三进程（proxy/collector/api）+ 反代域名 + MinIO 部署 + 备份恢复 + 安全清单 |
 | [nginx.md](./nginx.md) | 用自管 nginx 反代 ailens360：merge_slashes 坑、path 分流、双域名拆分、证书申请 |
 | [architecture.md](./architecture.md) | 系统架构（三进程 + Redis Stream + 对象存储）、流式指标、安全模型、数据模型、技术选型、关键设计决策 |

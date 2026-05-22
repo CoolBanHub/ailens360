@@ -101,7 +101,8 @@ ailens360/
 ├── deploy/
 │   └── docker/Dockerfile              # 单镜像；CMD 决定 role
 │
-├── docker-compose.yml                 # 全栈：3 进程 + Postgres + Redis + MinIO
+├── docker-compose.yml                 # 全栈：发布镜像 + Postgres + Redis + MinIO
+├── docker-compose.build.yml           # 全栈：从当前源码构建应用镜像
 ├── docker-compose.deps.yml            # 仅依赖：Postgres + Redis + MinIO（本机 `make run` 用）
 │
 ├── docs/                              # 设计文档
@@ -218,8 +219,12 @@ make lint               # go vet ./...
 make tidy               # go mod tidy
 make clean              # 清理 bin/ dist/
 make docker             # 构建 Docker 镜像
-make docker-up          # docker compose -f docker-compose.deps.yml up -d
-make docker-down        # docker compose -f docker-compose.deps.yml down
+make docker-up          # docker compose up -d（拉发布镜像）
+make docker-down        # docker compose down
+make docker-build-up    # docker compose + docker-compose.build.yml up -d --build
+make docker-build-down  # docker compose + docker-compose.build.yml down
+make docker-deps-up     # docker compose -f docker-compose.deps.yml up -d
+make docker-deps-down   # docker compose -f docker-compose.deps.yml down
 ```
 
 数据库迁移在 **collector 启动时**自动执行（`internal/storage/postgres/db.go`）；proxy / api 启动不动 schema。没有 sqlc 生成步骤，仓储实现走手写 SQL + `pgxpool`。

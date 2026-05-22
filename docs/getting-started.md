@@ -4,8 +4,8 @@
 
 ## 环境要求
 
-- Go 1.26+（**无需 CGO**；当前 `go.mod` 声明 `go 1.26.1`）
-- Postgres 14+、Redis 6+、MinIO（或任意 S3 兼容对象存储）—— 都是必备依赖；本地最简方式：`docker compose -f docker-compose.deps.yml up -d`
+- Docker 与 Docker Compose（推荐；会自动启动 Postgres、Redis、MinIO 和三个应用进程）
+- Go 1.26+（仅当需要本地源码运行；**无需 CGO**）
 - Node.js 20+ 与 pnpm（仅当需要本地跑前端控制台）
 - 任意 LLM 上游 API Key（OpenAI / Anthropic / Gemini / DeepSeek / Grok / 本地 vLLM / Ollama 均可）
 
@@ -19,31 +19,20 @@ AILens360 由**三个进程**共同对外提供服务：
 | `ailens360 collector` | `:8082` (健康检查) | 消费 Redis Stream → 写 PG / 实时指标 / 自动分区 |
 | `ailens360 api` | `:8081` | REST 控制台 + 静态 UI + body presign |
 
+推荐直接用发布镜像启动全栈：
+
 ```bash
 git clone https://github.com/CoolBanHub/ailens360.git
 cd ailens360
 
-# 构建（输出 ./bin/ailens360 —— 同一个二进制，靠子命令分进程）
-make build
+cat > .env <<EOF
+AILENS360_AUTH_USERNAME=admin
+AILENS360_AUTH_PASSWORD=admin
+AILENS360_JWT_SECRET=$(openssl rand -hex 32)
+EOF
 
-# 配置走 .env（项目根目录），首次拷贝模板后按需修改
-cp .env.example .env
-# 必填：AILENS360_JWT_SECRET（仅 api 进程需要）
-# 用 openssl rand -hex 32 生成
-
-# 启动依赖（Postgres + Redis + MinIO）
-docker compose -f docker-compose.deps.yml up -d
-
-# 同时起三个进程（前台）
-make run
-```
-
-`make run` 把三个进程跑在同一个 shell 里，日志交错输出；Ctrl-C 一起停。需要单独起或观察某一个：
-
-```bash
-make run-collector  # 跑迁移、消费 Stream、分区维护
-make run-proxy      # 反向代理 :8080
-make run-api        # REST + UI :8081
+docker compose up -d
+docker compose ps
 ```
 
 > collector 启动时会自动检查并 apply `internal/storage/postgres/migrations/` 下的迁移；其他进程启动不动 schema。
@@ -54,6 +43,33 @@ make run-api        # REST + UI :8081
 curl http://localhost:8080/healthz   # proxy
 curl http://localhost:8081/healthz   # api
 curl http://localhost:8082/healthz   # collector
+```
+
+需要固定镜像版本时，在 `.env` 加：
+
+```bash
+AILENS360_IMAGE=coolbanhub/ailens360:0.0.1
+```
+
+如果要从当前源码构建镜像：
+
+```bash
+make docker-build-up
+```
+
+如果要做后端本地开发，只启动依赖、应用在宿主机跑：
+
+```bash
+docker compose -f docker-compose.deps.yml up -d
+make run
+```
+
+`make run` 把三个进程跑在同一个 shell 里，日志交错输出；Ctrl-C 一起停。需要单独起或观察某一个：
+
+```bash
+make run-collector  # 跑迁移、消费 Stream、分区维护
+make run-proxy      # 反向代理 :8080
+make run-api        # REST + UI :8081
 ```
 
 ## 二、登录控制台
