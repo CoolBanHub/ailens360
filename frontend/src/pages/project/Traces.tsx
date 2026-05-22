@@ -188,8 +188,7 @@ export default function ProjectTraces() {
                                border-b border-[color:var(--glass-line)]">
                   <th className="py-3.5 pl-6 pr-3 font-semibold">{t('traces.col.time')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.trace')}</th>
-                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.user')}</th>
-                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.session')}</th>
+                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.user')} / {t('traces.col.session')}</th>
                   <th className="py-3.5 px-3 font-semibold text-right"><span className="inline-block -mr-[0.14em]">{t('traces.col.spans')}</span></th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.status')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.latency')}</th>
@@ -222,20 +221,18 @@ export default function ProjectTraces() {
                         {fmtTs(g.StartedAt)}
                       </td>
                       <td className="py-3.5 px-3 min-w-[240px]">
-                        <div className="font-semibold text-ink leading-tight">
-                          {g.TraceName || <span className="text-ink-4 font-normal italic">(unnamed)</span>}
+                        {g.TraceName && <div className="font-semibold text-ink leading-tight">{g.TraceName}</div>}
+                        <CopyableId value={g.TraceID} className={!g.TraceName ? 'text-[12px] text-ink-2' : 'text-[11px] text-ink-4 mt-0.5'} />
+                      </td>
+                      <td className="py-3.5 px-3">
+                        <div className="flex flex-col gap-0.5">
+                          {g.UserID
+                            ? <div className="max-w-[200px]"><CopyableId value={g.UserID} className="text-[12px] text-ink-2 w-full" /></div>
+                            : <span className="mono text-[12px] text-ink-4">—</span>}
+                          {g.SessionID
+                            ? <div className="max-w-[200px]"><CopyableId value={g.SessionID} className="text-[11px] text-ink-4 w-full" /></div>
+                            : null}
                         </div>
-                        <CopyableId value={g.TraceID} className="text-[11px] text-ink-4 mt-0.5" />
-                      </td>
-                      <td className="py-3.5 px-3">
-                        {g.UserID
-                          ? <div className="max-w-[160px]"><CopyableId value={g.UserID} className="text-[12px] text-ink-2 w-full" /></div>
-                          : <span className="mono text-[12px] text-ink-4">—</span>}
-                      </td>
-                      <td className="py-3.5 px-3">
-                        {g.SessionID
-                          ? <div className="max-w-[200px]"><CopyableId value={g.SessionID} className="text-[12px] text-ink-2 w-full" /></div>
-                          : <span className="mono text-[12px] text-ink-4">—</span>}
                       </td>
                       <td className="py-3.5 px-3 text-right tnum">
                         <span className="inline-flex items-center justify-center min-w-[26px]

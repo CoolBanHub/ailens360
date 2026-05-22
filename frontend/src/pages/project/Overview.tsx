@@ -130,7 +130,7 @@ export default function ProjectOverview() {
                   <span className={`dot ${g.Status === 'error' ? 'err' : g.Status === 'aborted' ? 'warn' : 'ok'}`} />
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold truncate">
-                      {g.TraceName || <span className="italic text-ink-4 font-normal">(unnamed)</span>}
+                      {g.TraceName || <span className="mono text-ink-4 font-normal text-[12px]">{g.TraceID?.slice(0, 8)}</span>}
                     </div>
                     <div className="text-[11px] mono text-ink-4 truncate">{g.TraceID}</div>
                   </div>

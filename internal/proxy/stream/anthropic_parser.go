@@ -133,6 +133,10 @@ func (p *AnthropicParser) handleEvent(ev *sse.Event, now time.Time, onFirstToken
 			if m.Delta.StopReason != "" {
 				p.finishReason = m.Delta.StopReason
 			}
+			if m.Usage.InputTokens > 0 {
+				p.inputTokens = m.Usage.InputTokens
+				p.usageSeen = true
+			}
 			if m.Usage.OutputTokens > 0 {
 				p.outputTokens = m.Usage.OutputTokens
 				p.usageSeen = true

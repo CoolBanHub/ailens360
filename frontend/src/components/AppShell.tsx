@@ -15,8 +15,6 @@ const Ico = (size = 16) => ({ width: size, height: size, viewBox: '0 0 24 24', .
 const IcHome     = () => <svg {...Ico()}><path d="M3 11l9-8 9 8"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>;
 const IcOverview = () => <svg {...Ico()}><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>;
 const IcTrace    = () => <svg {...Ico()}><path d="M3 6h6M3 12h12M3 18h8"/><circle cx="14" cy="6" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg>;
-const IcSession  = () => <svg {...Ico()}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>;
-const IcUser     = () => <svg {...Ico()}><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/><path d="M17 3.13a4 4 0 0 1 0 7.75"/></svg>;
 const IcSetup    = () => <svg {...Ico()}><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>;
 const IcGear     = () => <svg {...Ico()}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>;
 const IcChev     = () => <svg width="11" height="11" viewBox="0 0 24 24" {...Stroke}><path d="M6 9l6 6 6-6"/></svg>;
@@ -37,8 +35,6 @@ const projectSections: NavSection[] = [
     labelKey: 'nav.section.observability',
     items: [
       { to: 'traces',   labelKey: 'nav.module.traces',   Icon: IcTrace },
-      { to: 'sessions', labelKey: 'nav.module.sessions', Icon: IcSession, soon: true },
-      { to: 'users',    labelKey: 'nav.module.users',    Icon: IcUser,    soon: true },
     ],
   },
   {

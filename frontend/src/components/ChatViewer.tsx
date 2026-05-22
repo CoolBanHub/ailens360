@@ -616,8 +616,8 @@ function normalizeResponsesContent(content: any): Message['content'] | null {
 const ROLE_TINT: Record<string, string> = {
   system:    'bg-amber-50/70  border-amber-200/60  text-amber-900',
   developer: 'bg-amber-50/70  border-amber-200/60  text-amber-900',
-  user:      'bg-sky-50/70    border-sky-200/60    text-sky-900',
-  assistant: 'bg-emerald-50/70 border-emerald-200/60 text-emerald-900',
+  user:      'bg-blue-100/80    border-blue-300/70    text-blue-950',
+  assistant: 'bg-fuchsia-50/80  border-fuchsia-300/60 text-fuchsia-950',
   tool:      'bg-violet-50/70 border-violet-200/60 text-violet-900',
   function:  'bg-violet-50/70 border-violet-200/60 text-violet-900',
 };

@@ -233,6 +233,20 @@ body {
   word-break: break-all;
   max-height: 520px;
 }
+.codeblock::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.codeblock::-webkit-scrollbar-track {
+  background: transparent;
+}
+.codeblock::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 3px;
+}
+.codeblock::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
 .codeblock-prefix {
   font-family: var(--font-mono);
   font-size: 13px;

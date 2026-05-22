@@ -95,7 +95,7 @@ export default function TraceDetail() {
         </Link>
         <span className="text-ink-4">/</span>
         <span className="font-semibold text-ink truncate">
-          {first?.TraceName || <span className="italic text-ink-4 font-normal">{tt('detail.unnamed')}</span>}
+          {first?.TraceName || <span className="mono text-ink-4 font-normal text-[13px]">{first?.TraceID?.slice(0, 8)}</span>}
         </span>
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                           text-[11px] font-semibold border ${toneCls(worst)}`}>
@@ -137,7 +137,7 @@ export default function TraceDetail() {
                   <div className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500" />
                     <div className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                      {first?.TraceName || '(unnamed)'}
+                      {first?.TraceName || <span className="mono text-ink-4 text-[11px]">{first?.TraceID?.slice(0, 8)}</span>}
                     </div>
                     <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
                   </div>
@@ -296,7 +296,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
       <section className="glass glass-edge px-5 py-4">
         <div className="flex items-center gap-2 flex-wrap">
           <h2 className="text-[17px] font-bold tracking-tight">
-            {p.name || <span className="italic text-ink-4 font-normal">(unnamed)</span>}
+            {p.name || <span className="mono text-ink-4 font-normal text-[15px]">{p.traceId?.slice(0, 8)}</span>}
           </h2>
           <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                             text-[11px] font-semibold border ${toneCls(p.status)}`}>

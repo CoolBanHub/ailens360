@@ -153,7 +153,7 @@ func TestAnthropicParserStream(t *testing.T) {
 		"event: content_block_start\ndata: {}\n\n" +
 		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi \"}}\n\n" +
 		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"there\"}}\n\n" +
-		"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+		"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}\n\n" +
 		"event: message_stop\ndata: {}\n\n"
 
 	p := NewAnthropicParser()
@@ -173,6 +173,40 @@ func TestAnthropicParserStream(t *testing.T) {
 	}
 	if ev.FinishReason != "end_turn" {
 		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+}
+
+func TestAnthropicParserStreamUsesMessageDeltaInputTokens(t *testing.T) {
+	body := "" +
+		"event: message_start\ndata: {\"message\":{\"model\":\"claude-3-5-sonnet\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":52736}}}\n\n" +
+		"event: content_block_start\ndata: {\"content_block\":{\"type\":\"thinking\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"referring\"}}\n\n" +
+		"event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"/tmp/x.png\\\"}\"}}\n\n" +
+		"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":262,\"output_tokens\":77,\"cache_read_input_tokens\":52736,\"server_tool_use\":{\"web_search_requests\":0},\"service_tier\":\"standard\"}}\n\n" +
+		"event: message_stop\ndata: {}\n\n"
+
+	p := NewAnthropicParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	var firstTokenAt time.Time
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) { firstTokenAt = ts })
+	ev := &Event{}
+	p.Finalize(ev)
+
+	if ev.InputTokens != 262 {
+		t.Fatalf("input: %d", ev.InputTokens)
+	}
+	if ev.CachedInputTokens != 52736 {
+		t.Fatalf("cached: %d", ev.CachedInputTokens)
+	}
+	if ev.OutputTokens != 77 {
+		t.Fatalf("output: %d", ev.OutputTokens)
+	}
+	if ev.FinishReason != "end_turn" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+	if firstTokenAt.IsZero() || tl.LastToken.IsZero() {
+		t.Fatal("timeline not stamped")
 	}
 }
 
