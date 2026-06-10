@@ -12,11 +12,12 @@ const statusTone = (s: string) =>
   s === 'error' ? 'err' : s === 'aborted' ? 'warn' : 'ok';
 
 type StatusKey = '' | 'success' | 'error' | 'aborted';
-type TimeKey   = '' | '1h' | '24h' | '7d' | '30d' | 'custom';
+type TimeKey   = '' | '1h' | '24h' | '3d' | '7d' | '30d' | 'custom';
 
 const TIME_PRESETS: Record<Exclude<TimeKey, '' | 'custom'>, number> = {
   '1h':  60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
+  '3d':  3  * 24 * 60 * 60 * 1000,
   '7d':  7  * 24 * 60 * 60 * 1000,
   '30d': 30 * 24 * 60 * 60 * 1000,
 };
@@ -38,6 +39,13 @@ function defaultLocalDateTime(offsetMs = 0): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function parseTimeRange(raw: string | null): TimeKey {
+  if (raw === '' || raw === '1h' || raw === '24h' || raw === '3d' || raw === '7d' || raw === '30d' || raw === 'custom') {
+    return raw;
+  }
+  return '24h';
+}
+
 export default function ProjectTraces() {
   const { projectId = '' } = useParams();
   const nav = useNavigate();
@@ -50,7 +58,7 @@ export default function ProjectTraces() {
   const [traceName,  setTraceName]  = useState(search.get('trace_name') || '');
   const [model,      setModel]      = useState(search.get('model')      || '');
   const [status,     setStatus]     = useState<StatusKey>((search.get('status') as StatusKey) || '');
-  const [timeRange,  setTimeRange]  = useState<TimeKey>((search.get('time') as TimeKey) || '24h');
+  const [timeRange,  setTimeRange]  = useState<TimeKey>(() => parseTimeRange(search.get('time')));
   // Custom datetime-local strings (e.g. "2026-05-13T10:00"). Only used when timeRange === 'custom'.
   const [customStart, setCustomStart] = useState(() => defaultLocalDateTime(-24 * 60 * 60 * 1000));
   const [customEnd,   setCustomEnd]   = useState(() => defaultLocalDateTime());
@@ -340,7 +348,7 @@ interface TimeRangePickerProps {
   onChange: (tr: TimeKey, customStart?: string, customEnd?: string) => void;
 }
 
-const TIME_PRESET_KEYS: Exclude<TimeKey, 'custom'>[] = ['1h', '24h', '7d', '30d', ''];
+const TIME_PRESET_KEYS: Exclude<TimeKey, 'custom'>[] = ['1h', '24h', '3d', '7d', '30d', ''];
 
 function formatLocalShort(s: string): string {
   // "2026-05-13T14:30" → "5/13 14:30"
@@ -369,6 +377,7 @@ function TimeRangePicker({ timeRange, customStart, customEnd, onChange }: TimeRa
   const presetLabel = (k: Exclude<TimeKey, 'custom'>) =>
     k === '1h'  ? t('traces.filter.time.1h')  :
     k === '24h' ? t('traces.filter.time.24h') :
+    k === '3d'  ? t('traces.filter.time.3d')  :
     k === '7d'  ? t('traces.filter.time.7d')  :
     k === '30d' ? t('traces.filter.time.30d') :
                   t('traces.filter.time.all');

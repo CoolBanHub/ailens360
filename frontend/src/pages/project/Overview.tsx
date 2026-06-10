@@ -12,6 +12,7 @@ interface UsageResp { dimension: string; items: UsageItem[] }
 // numbers themselves are what should pop. Keep accent color for the single
 // "active" indicator (live-dot, primary CTA), not metric tiles.
 const TILE_CLS = 'rounded-2xl border border-white/70 bg-white/65 px-4 py-3.5';
+const RECENT_TRACE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 export default function ProjectOverview() {
   const { projectId = '' } = useParams();
@@ -27,8 +28,14 @@ export default function ProjectOverview() {
 
   const recent = useQuery({
     queryKey: ['proj-recent', projectId],
-    queryFn: () =>
-      api.get<ListResp<TraceGroup>>('/trace_groups?limit=5&project_id=' + projectId),
+    queryFn: () => {
+      const q = new URLSearchParams({
+        limit: '5',
+        project_id: projectId,
+        start_time: String(Date.now() - RECENT_TRACE_WINDOW_MS),
+      });
+      return api.get<ListResp<TraceGroup>>('/trace_groups?' + q.toString());
+    },
     refetchInterval: 5_000,
     enabled: !!projectId,
   });
@@ -107,7 +114,7 @@ export default function ProjectOverview() {
         <section className="glass glass-edge p-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-[11px] uppercase tracking-[0.16em] text-ink-4 font-semibold">{t('overview.recent')}</h3>
-            <Link to={`/projects/${projectId}/traces`}
+            <Link to={`/projects/${projectId}/traces?time=3d`}
                   className="text-xs font-semibold text-indigo-600 hover:underline">
               {t('overview.viewAll')} →
             </Link>
@@ -123,7 +130,7 @@ export default function ProjectOverview() {
               {(recent.data?.items ?? []).map((g) => (
                 <Link
                   key={g.TraceID}
-                  to={`/projects/${projectId}/traces?trace=${encodeURIComponent(g.TraceID)}`}
+                  to={`/projects/${projectId}/traces/${encodeURIComponent(g.TraceID)}`}
                   className="flex items-center gap-3 px-3 py-2.5 rounded-2xl
                              bg-white/55 hover:bg-white/85 border border-white/70 transition"
                 >
