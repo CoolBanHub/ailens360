@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -173,9 +172,11 @@ func (h *Handlers) ResetProjectKey(w http.ResponseWriter, r *http.Request) {
 //	e.g. "http://localhost:8080/https://api.openai.com/v1"
 //
 // The project itself is identified by the X-AILens-Project-Key header carrying
-// the value of `project_key`.
+// the value of `project_key`. Path/query examples deliberately use a placeholder
+// so the key is not spread through every rendered setup URL.
 func (h *Handlers) projectView(p *repo.Project, r *http.Request) map[string]any {
 	prefix := h.buildProxyPrefix(r)
+	const projectKeyPlaceholder = "{project_key}"
 	return map[string]any{
 		"id":           p.ID,
 		"project_key":  p.ProjectKey,
@@ -186,14 +187,14 @@ func (h *Handlers) projectView(p *repo.Project, r *http.Request) map[string]any 
 			"anthropic": prefix + "/https://api.anthropic.com",
 			"gemini":    prefix + "/https://generativelanguage.googleapis.com/v1beta",
 			"path_key": map[string]string{
-				"openai":    prefix + "/" + p.ProjectKey + "/https://api.openai.com/v1",
-				"anthropic": prefix + "/" + p.ProjectKey + "/https://api.anthropic.com",
-				"gemini":    prefix + "/" + p.ProjectKey + "/https://generativelanguage.googleapis.com/v1beta",
+				"openai":    prefix + "/" + projectKeyPlaceholder + "/https://api.openai.com/v1",
+				"anthropic": prefix + "/" + projectKeyPlaceholder + "/https://api.anthropic.com",
+				"gemini":    prefix + "/" + projectKeyPlaceholder + "/https://generativelanguage.googleapis.com/v1beta",
 			},
 			"query_key": map[string]string{
-				"openai":    prefix + "/https://api.openai.com/v1?sk=" + url.QueryEscape(p.ProjectKey),
-				"anthropic": prefix + "/https://api.anthropic.com?sk=" + url.QueryEscape(p.ProjectKey),
-				"gemini":    prefix + "/https://generativelanguage.googleapis.com/v1beta?sk=" + url.QueryEscape(p.ProjectKey),
+				"openai":    prefix + "/https://api.openai.com/v1?sk=" + projectKeyPlaceholder,
+				"anthropic": prefix + "/https://api.anthropic.com?sk=" + projectKeyPlaceholder,
+				"gemini":    prefix + "/https://generativelanguage.googleapis.com/v1beta?sk=" + projectKeyPlaceholder,
 			},
 		},
 		"created_at": p.CreatedAt.Unix(),

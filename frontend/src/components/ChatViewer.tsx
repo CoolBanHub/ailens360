@@ -39,6 +39,7 @@ interface ContentPart {
 interface Message {
   role?: Role | string;
   content?: string | ContentPart[];
+  reasoning_content?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -203,6 +204,7 @@ interface OpenAIChunk {
     delta?: {
       role?: string;
       content?: string;
+      reasoning_content?: string;
       tool_calls?: OpenAIToolDelta[];
     };
     finish_reason?: string | null;
@@ -219,6 +221,7 @@ interface ToolCallBuilder {
 interface ChoiceBuilder {
   role: string;
   content: string;
+  reasoningContent: string;
   toolBuilders: Map<number, ToolCallBuilder>;
   toolOrder: number[];
 }
@@ -299,7 +302,7 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   const choiceFor = (idx: number): ChoiceBuilder => {
     let cb = choices.get(idx);
     if (!cb) {
-      cb = { role: 'assistant', content: '', toolBuilders: new Map(), toolOrder: [] };
+      cb = { role: 'assistant', content: '', reasoningContent: '', toolBuilders: new Map(), toolOrder: [] };
       choices.set(idx, cb);
       choiceOrder.push(idx);
     }
@@ -319,6 +322,7 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
       const cb = choiceFor(choice.index ?? 0);
       if (delta.role) cb.role = delta.role;
       if (typeof delta.content === 'string') cb.content += delta.content;
+      if (typeof delta.reasoning_content === 'string') cb.reasoningContent += delta.reasoning_content;
       if (Array.isArray(delta.tool_calls)) {
         for (const tcd of delta.tool_calls) {
           const tIdx = tcd.index ?? 0;
@@ -340,8 +344,10 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   const out: Message[] = [];
   for (const idx of choiceOrder) {
     const cb = choices.get(idx)!;
-    if (!cb.content && cb.toolOrder.length === 0) continue;
-    const msg: Message = { role: cb.role as Role, content: cb.content };
+    if (!cb.content && !cb.reasoningContent && cb.toolOrder.length === 0) continue;
+    const msg: Message = { role: cb.role as Role };
+    if (cb.content) msg.content = cb.content;
+    if (cb.reasoningContent) msg.reasoning_content = cb.reasoningContent;
     if (cb.toolOrder.length > 0) {
       msg.tool_calls = cb.toolOrder.map((tIdx) => {
         const tb = cb.toolBuilders.get(tIdx)!;
@@ -639,6 +645,15 @@ function MessageBubble({ m }: { m: Message }) {
       </div>
 
       <ContentRenderer content={m.content} role={role} />
+
+      {typeof m.reasoning_content === 'string' && m.reasoning_content.trim() && (
+        <div className="mt-2 rounded-xl bg-white/40 border border-dashed border-white/70 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
+            reasoning
+          </div>
+          <TextBlock>{m.reasoning_content}</TextBlock>
+        </div>
+      )}
 
       {/* OpenAI: tool_calls on assistant messages */}
       {Array.isArray(m.tool_calls) && m.tool_calls.length > 0 && (

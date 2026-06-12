@@ -17,6 +17,8 @@ const presets: { label: string; key: ProviderKey; grad: string; }[] = [
 
 type AccessMode = 'header' | 'path' | 'query';
 
+const PROJECT_KEY_PLACEHOLDER = '{project_key}';
+
 export default function ProjectSetup() {
   const { projectId = '' } = useParams();
   const qc = useQueryClient();
@@ -49,9 +51,20 @@ export default function ProjectSetup() {
     return idx > 0 ? sample.slice(0, idx) : sample.replace(/\/+$/, '');
   })();
 
+  const withProjectKeyPlaceholder = (value: string) =>
+    p.project_key ? value.split(p.project_key).join(PROJECT_KEY_PLACEHOLDER) : value;
+
   const exampleFor = (mode: AccessMode, key: ProviderKey) => {
-    if (mode === 'path') return p.example.path_key?.[key] ?? `${gatewayBase}/${p.project_key}/${p.example[key].slice(gatewayBase.length + 1)}`;
-    if (mode === 'query') return p.example.query_key?.[key] ?? `${p.example[key]}?sk=${encodeURIComponent(p.project_key)}`;
+    if (mode === 'path') {
+      return withProjectKeyPlaceholder(
+        p.example.path_key?.[key] ?? `${gatewayBase}/${PROJECT_KEY_PLACEHOLDER}/${p.example[key].slice(gatewayBase.length + 1)}`,
+      );
+    }
+    if (mode === 'query') {
+      return withProjectKeyPlaceholder(
+        p.example.query_key?.[key] ?? `${p.example[key]}?sk=${PROJECT_KEY_PLACEHOLDER}`,
+      );
+    }
     return p.example[key];
   };
 
@@ -180,7 +193,7 @@ export default function ProjectSetup() {
 client = OpenAI(
     api_key="sk-real-openai-key",
     base_url="${p.example.openai}",
-    default_headers={"X-AILens-Project-Key": "${p.project_key}"},
+    default_headers={"X-AILens-Project-Key": "${PROJECT_KEY_PLACEHOLDER}"},
 )
 resp = client.chat.completions.create(
     model="gpt-5.5",
@@ -194,7 +207,7 @@ resp = client.chat.completions.create(
 const client = new OpenAI({
   apiKey: 'sk-real-openai-key',
   baseURL: '${p.example.openai}',
-  defaultHeaders: { 'X-AILens-Project-Key': '${p.project_key}' },
+  defaultHeaders: { 'X-AILens-Project-Key': '${PROJECT_KEY_PLACEHOLDER}' },
 });
 
 await client.chat.completions.create({
@@ -209,7 +222,7 @@ await client.chat.completions.create({
 client = anthropic.Anthropic(
     api_key="sk-ant-real-key",
     base_url="${p.example.anthropic}",
-    default_headers={"X-AILens-Project-Key": "${p.project_key}"},
+    default_headers={"X-AILens-Project-Key": "${PROJECT_KEY_PLACEHOLDER}"},
 )
 msg = client.messages.create(
     model="claude-3-5-sonnet-latest",
@@ -231,7 +244,7 @@ cm, _ := openai.NewChatModel(ctx, &openai.ChatModelConfig{
     APIKey:     "sk-real-key",
     Model:      "gpt-5.5",
     BaseURL:    "${p.example.openai}",
-    HTTPClient: &http.Client{Transport: &kHeader{key: "${p.project_key}"}},
+    HTTPClient: &http.Client{Transport: &kHeader{key: "${PROJECT_KEY_PLACEHOLDER}"}},
 })`}
           />
         </div>

@@ -134,10 +134,10 @@ curl -X POST http://localhost:8081/api/projects \
 #         "anthropic": "http://localhost:8080/https://api.anthropic.com",
 #         "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta",
 #         "path_key": {
-#           "openai": "http://localhost:8080/sk-demo.../https://api.openai.com/v1"
+#           "openai": "http://localhost:8080/{project_key}/https://api.openai.com/v1"
 #         },
 #         "query_key": {
-#           "openai": "http://localhost:8080/https://api.openai.com/v1?sk=sk-demo..."
+#           "openai": "http://localhost:8080/https://api.openai.com/v1?sk={project_key}"
 #         }
 #       }
 #     }

@@ -112,10 +112,10 @@ curl -X POST http://localhost:8081/api/projects \
       "anthropic": "http://localhost:8080/https://api.anthropic.com",
       "gemini":    "http://localhost:8080/https://generativelanguage.googleapis.com/v1beta",
       "path_key": {
-        "openai": "http://localhost:8080/sk-demo.../https://api.openai.com/v1"
+        "openai": "http://localhost:8080/{project_key}/https://api.openai.com/v1"
       },
       "query_key": {
-        "openai": "http://localhost:8080/https://api.openai.com/v1?sk=sk-demo..."
+        "openai": "http://localhost:8080/https://api.openai.com/v1?sk={project_key}"
       }
     },
     "created_at": 1778575825,
@@ -124,7 +124,7 @@ curl -X POST http://localhost:8081/api/projects \
 }
 ```
 
-把 `example.openai` 当成应用 SDK 的 `base_url`，再把 `project_key` 放进 `X-AILens-Project-Key` 头即可。也可以直接使用 `example.path_key.openai`，把 `sk-...` 放在 URL 路径里；或使用 `example.query_key.openai`，把 `sk-...` 放在查询参数里。`proxy_prefix` 是 **proxy 进程的 origin**（自动识别请求 host 并替换为 proxy 端口；生产建议显式配 `AILENS360_PUBLIC_URL`）。
+把 `example.openai` 当成应用 SDK 的 `base_url`，再把 `project_key` 放进 `X-AILens-Project-Key` 头即可。也可以使用 `example.path_key.openai` 或 `example.query_key.openai`，把其中的 `{project_key}` 替换成实际项目密钥。`proxy_prefix` 是 **proxy 进程的 origin**（自动识别请求 host 并替换为 proxy 端口；生产建议显式配 `AILENS360_PUBLIC_URL`）。
 
 ## 四、发起一次带观测的调用
 

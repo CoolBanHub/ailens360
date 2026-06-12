@@ -52,7 +52,8 @@ type openaiChunk struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 			// We don't reassemble tool_calls server-side (the UI does that
 			// from the raw SSE), but we DO need to know whether a tool-call
 			// delta arrived so the stream timeline picks up FirstToken /
@@ -141,6 +142,9 @@ func (p *OpenAIParser) handleChunk(data []byte, now time.Time, onFirstToken func
 	for _, ch := range c.Choices {
 		if ch.Delta.Content != "" {
 			delta += ch.Delta.Content
+		}
+		if ch.Delta.ReasoningContent != "" {
+			delta += ch.Delta.ReasoningContent
 		}
 		if len(ch.Delta.ToolCalls) > 0 {
 			sawToolDelta = true
@@ -332,7 +336,8 @@ func (p *OpenAIParser) ParseNonStream(body []byte, ev *Event) {
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -347,6 +352,9 @@ func (p *OpenAIParser) ParseNonStream(body []byte, ev *Event) {
 	for _, c := range resp.Choices {
 		if c.Message.Content != "" {
 			ev.ResponseText = c.Message.Content
+		}
+		if c.Message.ReasoningContent != "" {
+			ev.ResponseText += c.Message.ReasoningContent
 		}
 		if c.FinishReason != "" {
 			ev.FinishReason = c.FinishReason

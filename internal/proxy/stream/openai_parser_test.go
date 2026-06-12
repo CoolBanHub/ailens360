@@ -69,6 +69,38 @@ func TestOpenAIParserStreamMarksTimelineForToolCallOnly(t *testing.T) {
 	}
 }
 
+func TestOpenAIParserStreamCollectsReasoningContent(t *testing.T) {
+	body := "" +
+		`data: {"id":"20260612163727f6cc04e3ef064555","created":1781253447,"object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The"}}]}` + "\n\n" +
+		`data: {"id":"20260612163727f6cc04e3ef064555","created":1781253447,"object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" user"}}]}` + "\n\n" +
+		`data: {"id":"20260612163727f6cc04e3ef064555","created":1781253447,"object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_2ad6cbf3241a47de859ffb1e","index":0,"type":"function","function":{"name":"数学助手","arguments":"{\"request\":\"计算 123.5 + 456.8 等于多少\"}"}}]}}]}` + "\n\n" +
+		`data: {"id":"20260612163727f6cc04e3ef064555","created":1781253447,"object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":373,"completion_tokens":44,"total_tokens":417,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":17}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	p := NewOpenAIParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	var firstTokenAt time.Time
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) { firstTokenAt = ts })
+	ev := &Event{}
+	p.Finalize(ev)
+
+	if ev.ResponseText != "The user" {
+		t.Fatalf("text: %q", ev.ResponseText)
+	}
+	if ev.Model != "glm-5.1" {
+		t.Fatalf("model: %q", ev.Model)
+	}
+	if ev.FinishReason != "tool_calls" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+	if ev.InputTokens != 373 || ev.OutputTokens != 44 || ev.TotalTokens != 417 || ev.ReasoningTokens != 17 {
+		t.Fatalf("usage: in=%d out=%d total=%d reasoning=%d", ev.InputTokens, ev.OutputTokens, ev.TotalTokens, ev.ReasoningTokens)
+	}
+	if firstTokenAt.IsZero() || tl.LastToken.IsZero() {
+		t.Fatal("reasoning_content stream did not stamp token timeline")
+	}
+}
+
 func TestOpenAIParserResponsesStreamCollectsTextAndUsage(t *testing.T) {
 	body := "" +
 		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","status":"in_progress"}}` + "\n\n" +
