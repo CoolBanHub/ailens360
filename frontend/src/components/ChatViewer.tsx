@@ -647,8 +647,8 @@ function MessageBubble({ m }: { m: Message }) {
       <ContentRenderer content={m.content} role={role} />
 
       {typeof m.reasoning_content === 'string' && m.reasoning_content.trim() && (
-        <div className="mt-2 rounded-xl bg-white/40 border border-dashed border-white/70 px-3 py-2">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
+        <div className="mt-2 rounded-xl bg-cyan-50/85 border border-cyan-200/80 px-3 py-2 text-cyan-950">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-cyan-700/80 font-semibold mb-1">
             reasoning
           </div>
           <TextBlock>{m.reasoning_content}</TextBlock>
@@ -657,10 +657,15 @@ function MessageBubble({ m }: { m: Message }) {
 
       {/* OpenAI: tool_calls on assistant messages */}
       {Array.isArray(m.tool_calls) && m.tool_calls.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1.5">
-          {m.tool_calls.map((tc, i) => (
-            <ToolCallCard key={i} tc={tc} />
-          ))}
+        <div className="mt-2 rounded-xl bg-violet-50/85 border border-violet-200/80 px-3 py-2 text-violet-950">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-violet-700/80 font-semibold mb-1.5">
+            tool_calls
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {m.tool_calls.map((tc, i) => (
+              <ToolCallCard key={i} tc={tc} />
+            ))}
+          </div>
         </div>
       )}
 
