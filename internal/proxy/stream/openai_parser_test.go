@@ -101,6 +101,33 @@ func TestOpenAIParserStreamCollectsReasoningContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIParserStreamAcceptsEmptyContentCompletion(t *testing.T) {
+	body := "" +
+		`data: {"id":"resp_0b1a55de2cad3670016a2bcd99dafc819992b4020f5e067a9b","object":"chat.completion.chunk","created":1781255578,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"resp_0b1a55de2cad3670016a2bcd99dafc819992b4020f5e067a9b","object":"chat.completion.chunk","created":1781255578,"model":"gpt-5.5","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"resp_0b1a55de2cad3670016a2bcd99dafc819992b4020f5e067a9b","object":"chat.completion.chunk","created":1781255578,"model":"gpt-5.5","choices":[],"usage":{"prompt_tokens":12053,"completion_tokens":4,"total_tokens":12057}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	p := NewOpenAIParser()
+	tl := &Timeline{RequestIn: time.Now()}
+	p.Feed(strings.NewReader(body), tl, func(ts time.Time) {})
+	ev := &Event{}
+	p.Finalize(ev)
+
+	if ev.ResponseText != "" {
+		t.Fatalf("text: %q", ev.ResponseText)
+	}
+	if ev.Model != "gpt-5.5" {
+		t.Fatalf("model: %q", ev.Model)
+	}
+	if ev.FinishReason != "stop" {
+		t.Fatalf("finish: %q", ev.FinishReason)
+	}
+	if ev.InputTokens != 12053 || ev.OutputTokens != 4 || ev.TotalTokens != 12057 {
+		t.Fatalf("usage: in=%d out=%d total=%d", ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
+	}
+}
+
 func TestOpenAIParserResponsesStreamCollectsTextAndUsage(t *testing.T) {
 	body := "" +
 		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","status":"in_progress"}}` + "\n\n" +

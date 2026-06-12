@@ -221,7 +221,9 @@ interface ToolCallBuilder {
 interface ChoiceBuilder {
   role: string;
   content: string;
+  contentDeltaSeen: boolean;
   reasoningContent: string;
+  finishReason?: string;
   toolBuilders: Map<number, ToolCallBuilder>;
   toolOrder: number[];
 }
@@ -302,7 +304,14 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   const choiceFor = (idx: number): ChoiceBuilder => {
     let cb = choices.get(idx);
     if (!cb) {
-      cb = { role: 'assistant', content: '', reasoningContent: '', toolBuilders: new Map(), toolOrder: [] };
+      cb = {
+        role: 'assistant',
+        content: '',
+        contentDeltaSeen: false,
+        reasoningContent: '',
+        toolBuilders: new Map(),
+        toolOrder: [],
+      };
       choices.set(idx, cb);
       choiceOrder.push(idx);
     }
@@ -317,11 +326,17 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
     try { chunk = JSON.parse(payload) as OpenAIChunk; } catch { continue; }
     if (!Array.isArray(chunk.choices)) continue;
     for (const choice of chunk.choices) {
+      const cb = choiceFor(choice.index ?? 0);
+      if (typeof choice.finish_reason === 'string' && choice.finish_reason) {
+        cb.finishReason = choice.finish_reason;
+      }
       const delta = choice.delta;
       if (!delta) continue;
-      const cb = choiceFor(choice.index ?? 0);
       if (delta.role) cb.role = delta.role;
-      if (typeof delta.content === 'string') cb.content += delta.content;
+      if (typeof delta.content === 'string') {
+        cb.content += delta.content;
+        cb.contentDeltaSeen = true;
+      }
       if (typeof delta.reasoning_content === 'string') cb.reasoningContent += delta.reasoning_content;
       if (Array.isArray(delta.tool_calls)) {
         for (const tcd of delta.tool_calls) {
@@ -344,9 +359,9 @@ function assembleOpenAIStream(raw: string | null | undefined): Message[] {
   const out: Message[] = [];
   for (const idx of choiceOrder) {
     const cb = choices.get(idx)!;
-    if (!cb.content && !cb.reasoningContent && cb.toolOrder.length === 0) continue;
+    if (!cb.content && !cb.contentDeltaSeen && !cb.reasoningContent && cb.toolOrder.length === 0 && !cb.finishReason) continue;
     const msg: Message = { role: cb.role as Role };
-    if (cb.content) msg.content = cb.content;
+    if (cb.content || cb.contentDeltaSeen || cb.finishReason) msg.content = cb.content;
     if (cb.reasoningContent) msg.reasoning_content = cb.reasoningContent;
     if (cb.toolOrder.length > 0) {
       msg.tool_calls = cb.toolOrder.map((tIdx) => {
@@ -631,6 +646,10 @@ const ROLE_TINT: Record<string, string> = {
 function MessageBubble({ m }: { m: Message }) {
   const role = (m.role || 'user').toLowerCase();
   const tint = ROLE_TINT[role] || 'bg-white/55 border-white/70 text-ink';
+  const reasoning = typeof m.reasoning_content === 'string' && m.reasoning_content.trim()
+    ? m.reasoning_content
+    : '';
+  const renderContentAsBlock = !!reasoning && hasRenderableContent(m.content);
 
   return (
     <div className={'rounded-2xl border px-3.5 py-2.5 ' + tint}>
@@ -644,15 +663,24 @@ function MessageBubble({ m }: { m: Message }) {
         )}
       </div>
 
-      <ContentRenderer content={m.content} role={role} />
-
-      {typeof m.reasoning_content === 'string' && m.reasoning_content.trim() && (
+      {reasoning && (
         <div className="mt-2 rounded-xl bg-cyan-50/85 border border-cyan-200/80 px-3 py-2 text-cyan-950">
           <div className="text-[10px] uppercase tracking-[0.14em] text-cyan-700/80 font-semibold mb-1">
             reasoning
           </div>
-          <TextBlock>{m.reasoning_content}</TextBlock>
+          <TextBlock>{reasoning}</TextBlock>
         </div>
+      )}
+
+      {renderContentAsBlock ? (
+        <div className="mt-2 rounded-xl bg-emerald-50/85 border border-emerald-200/80 px-3 py-2 text-emerald-950">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-emerald-700/80 font-semibold mb-1">
+            content
+          </div>
+          <ContentRenderer content={m.content} role={role} />
+        </div>
+      ) : (
+        <ContentRenderer content={m.content} role={role} />
       )}
 
       {/* OpenAI: tool_calls on assistant messages */}
@@ -677,6 +705,12 @@ function MessageBubble({ m }: { m: Message }) {
       )}
     </div>
   );
+}
+
+function hasRenderableContent(content: Message['content']): boolean {
+  if (content == null) return false;
+  if (typeof content === 'string') return !!content.trim();
+  return content.length > 0;
 }
 
 function ContentRenderer({ content, role }: { content: Message['content']; role: string }) {
