@@ -25,6 +25,7 @@ interface ToolCall {
 interface ContentPart {
   type?: string;
   text?: string;
+  cache_control?: unknown;
   image_url?: { url?: string } | string;
   source?: { type?: string; media_type?: string; data?: string }; // anthropic image
   // Anthropic tool_use
@@ -48,6 +49,7 @@ interface Message {
 
 interface ChatPayload {
   messages?: Message[];
+  system?: string | ContentPart[];
   // anthropic responses
   content?: ContentPart[] | string;
   role?: Role | string;
@@ -536,8 +538,7 @@ function extractMessages(p: ChatPayload | null, mode: 'request' | 'response'): M
   if (mode === 'request') {
     const responsesReq = extractResponsesRequest(p);
     if (responsesReq.length > 0) return responsesReq;
-    if (Array.isArray(p.messages)) return p.messages;
-    return [];
+    return extractRequestMessages(p);
   }
   // response
   if (Array.isArray(p.choices)) {
@@ -552,6 +553,17 @@ function extractMessages(p: ChatPayload | null, mode: 'request' | 'response'): M
   const responsesResp = extractResponsesResponse(p);
   if (responsesResp.length > 0) return responsesResp;
   return [];
+}
+
+function extractRequestMessages(p: ChatPayload): Message[] {
+  const out: Message[] = [];
+  if (typeof p.system === 'string' && p.system.trim()) {
+    out.push({ role: 'system', content: p.system });
+  } else if (Array.isArray(p.system) && p.system.length > 0) {
+    out.push({ role: 'system', content: p.system });
+  }
+  if (Array.isArray(p.messages)) out.push(...p.messages);
+  return out;
 }
 
 function extractResponsesRequest(p: ChatPayload): Message[] {
@@ -649,7 +661,12 @@ function MessageBubble({ m }: { m: Message }) {
   const reasoning = typeof m.reasoning_content === 'string' && m.reasoning_content.trim()
     ? m.reasoning_content
     : '';
+  const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+  const hasToolCalls = toolCalls.length > 0;
+  const hasFunctionCall = !!m.function_call;
+  const hasAuxiliaryOutput = !!reasoning || hasToolCalls || hasFunctionCall;
   const renderContentAsBlock = !!reasoning && hasRenderableContent(m.content);
+  const shouldRenderContent = hasRenderableContent(m.content) || !hasAuxiliaryOutput;
 
   return (
     <div className={'rounded-2xl border px-3.5 py-2.5 ' + tint}>
@@ -664,8 +681,8 @@ function MessageBubble({ m }: { m: Message }) {
       </div>
 
       {reasoning && (
-        <div className="mt-2 rounded-xl bg-cyan-50/85 border border-cyan-200/80 px-3 py-2 text-cyan-950">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-cyan-700/80 font-semibold mb-1">
+        <div className="mt-2 rounded-xl bg-zinc-50/90 border border-zinc-300/80 px-3 py-2 text-zinc-950">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-zinc-600/90 font-semibold mb-1">
             reasoning
           </div>
           <TextBlock>{reasoning}</TextBlock>
@@ -679,18 +696,18 @@ function MessageBubble({ m }: { m: Message }) {
           </div>
           <ContentRenderer content={m.content} role={role} />
         </div>
-      ) : (
+      ) : shouldRenderContent ? (
         <ContentRenderer content={m.content} role={role} />
-      )}
+      ) : null}
 
       {/* OpenAI: tool_calls on assistant messages */}
-      {Array.isArray(m.tool_calls) && m.tool_calls.length > 0 && (
-        <div className="mt-2 rounded-xl bg-violet-50/85 border border-violet-200/80 px-3 py-2 text-violet-950">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-violet-700/80 font-semibold mb-1.5">
+      {hasToolCalls && (
+        <div className="mt-2 rounded-xl bg-red-50/85 border border-red-200/80 px-3 py-2 text-red-950">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-red-700/80 font-semibold mb-1.5">
             tool_calls
           </div>
           <div className="flex flex-col gap-1.5">
-            {m.tool_calls.map((tc, i) => (
+            {toolCalls.map((tc, i) => (
               <ToolCallCard key={i} tc={tc} />
             ))}
           </div>
@@ -734,6 +751,17 @@ function ContentPartView({ part }: { part: ContentPart }) {
 
   // Text part (OpenAI: type=text; Anthropic: type=text)
   if (type === 'text' && typeof part.text === 'string') {
+    const cacheControl = cacheControlLabel(part.cache_control);
+    if (cacheControl) {
+      return (
+        <div className="rounded-xl bg-white/55 border border-white/70 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
+            text <span className="mono normal-case opacity-70">· cache_control {cacheControl}</span>
+          </div>
+          <TextBlock>{part.text}</TextBlock>
+        </div>
+      );
+    }
     return <TextBlock>{part.text}</TextBlock>;
   }
 
@@ -771,8 +799,8 @@ function ContentPartView({ part }: { part: ContentPart }) {
         ? part.content.map((p) => p.text || '').join('\n')
         : '';
     return (
-      <div className="rounded-xl bg-white/55 border border-white/70 px-3 py-2">
-        <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
+      <div className="rounded-xl bg-sky-50/85 border border-sky-200/80 px-3 py-2 text-sky-950">
+        <div className="text-[10px] uppercase tracking-[0.14em] text-sky-700/80 font-semibold mb-1">
           tool_result {part.tool_use_id && <span className="mono normal-case opacity-70">· {part.tool_use_id}</span>}
         </div>
         <TextBlock>{text}</TextBlock>
@@ -786,6 +814,12 @@ function ContentPartView({ part }: { part: ContentPart }) {
       {JSON.stringify(part, null, 2)}
     </pre>
   );
+}
+
+function cacheControlLabel(cacheControl: unknown): string {
+  if (!cacheControl || typeof cacheControl !== 'object') return '';
+  const type = (cacheControl as { type?: unknown }).type;
+  return typeof type === 'string' && type.trim() ? type : '';
 }
 
 // Threshold above which TextBlock starts collapsed. Picked to keep a long
