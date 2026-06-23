@@ -1,12 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useState } from 'react';
 import { api } from '../../lib/api';
 import type { ListResp, Trace } from '../../lib/types';
-import { fmtCost, fmtCostFine, fmtDur, fmtTs } from '../../lib/fmt';
+import { fmtCost, fmtCostFine, fmtDur, fmtTs, copyToClipboard } from '../../lib/fmt';
 import BodyViewer from '../../components/BodyViewer';
 import { TokenCell } from '../../components/TokenCell';
 import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
+import { getAuth } from '../../lib/auth';
+import {
+  generateAIAnalysisPrompt,
+  generateMultiTurnAnalysisContent,
+  downloadAsFile
+} from '../../lib/aiAnalysisPrompt';
 
 /* ── types ───────────────────────────────────────────────────── */
 interface TimelineEvt { event: string; ts: number; }
@@ -283,13 +290,66 @@ interface TraceSummaryProps {
   spans: Trace[];
 }
 
+// AI Analysis for TraceSummary: analyze all spans
 function TraceSummaryPanel(p: TraceSummaryProps) {
   const tt = useT();
+  const [isCopying, setIsCopying] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
   const statusLabel = (s: string) => {
     const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
     const v = tt(key);
     return v === key ? s : v;
   };
+
+  // AI Analysis: fetch all request/response bodies and download as file
+  const handleAIAnalysis = async () => {
+    if (p.spans.length === 0) return;
+    try {
+      setIsCopying(true);
+      setCopyError(null);
+      setCopySuccess(false);
+
+      const { token } = getAuth();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+
+      // Fetch all request/response bodies in parallel
+      const bodies = await Promise.all(
+        p.spans.map(async (span) => {
+          const [requestBody, responseBody] = await Promise.all([
+            fetch(`/api/traces/${span.ID}/body?part=request`, { headers }).then(r => r.text()).catch(() => ''),
+            fetch(`/api/traces/${span.ID}/body?part=response`, { headers }).then(r => r.text()).catch(() => ''),
+          ]);
+          return { span, requestBody, responseBody };
+        })
+      );
+
+      // Generate combined analysis content
+      const content = generateMultiTurnAnalysisContent(p.spans, bodies, {
+        totalDur: p.totalDur,
+        totalIn: p.totalIn,
+        totalOut: p.totalOut,
+        totalCached: p.totalCached,
+        totalCost: p.totalCost,
+      });
+
+      // Generate filename with timestamp
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-').replace('T', '_');
+      const filename = `trace_analysis_${p.traceId.slice(0, 8)}_${timestamp}.txt`;
+
+      // Download as file
+      downloadAsFile(content, filename);
+      setIsCopying(false);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (err) {
+      setCopyError(err instanceof Error ? err.message : '下载失败');
+      setIsCopying(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       {/* compact header */}
@@ -303,6 +363,33 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
             <span className={`dot ${dotCls(p.status)}`} />
             {statusLabel(p.status)}
           </span>
+
+          {/* AI Analysis Button - Download for multi-turn */}
+          <button
+            type="button"
+            onClick={handleAIAnalysis}
+            disabled={isCopying || p.spans.length === 0}
+            className="ml-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                       bg-gradient-to-r from-emerald-500 to-teal-500
+                       hover:from-emerald-600 hover:to-teal-600
+                       text-white text-[11px] font-semibold
+                       shadow-[0_2px_8px_-2px_rgba(16,185,129,0.40)]
+                       hover:shadow-[0_4px_12px_-2px_rgba(16,185,129,0.50)]
+                       transition-all
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+            </svg>
+            {isCopying ? '下载中...' : `下载分析 (${p.spans.length})`}
+          </button>
+          {copySuccess && (
+            <span className="text-[10.5px] text-emerald-600">✓ 已下载</span>
+          )}
+          {copyError && (
+            <span className="text-[10.5px] text-rose-600">{copyError}</span>
+          )}
+
           <span className="ml-auto text-[11px] mono text-ink-4 select-all">{p.traceId}</span>
         </div>
 
@@ -395,6 +482,10 @@ function TokenTile({ label, tokens }: { label: string; tokens: import('../../com
 
 function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string; projectId?: string; showTraceMeta?: boolean }) {
   const tt = useT();
+  const [isCopying, setIsCopying] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
   const statusLabel = (s: string) => {
     const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
     const v = tt(key);
@@ -406,6 +497,51 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
     enabled: !!spanId,
   });
   const t = q.data;
+
+  // AI Analysis: fetch request/response bodies and generate prompt
+  const handleAIAnalysis = async () => {
+    if (!t) return;
+    try {
+      setIsCopying(true);
+      setCopyError(null);
+      setCopySuccess(false);
+
+      const { token } = getAuth();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+
+      // Fetch request and response bodies
+      const [requestBody, responseBody] = await Promise.all([
+        fetch(`/api/traces/${t.ID}/body?part=request`, { headers }).then(r => r.text()).catch(() => ''),
+        fetch(`/api/traces/${t.ID}/body?part=response`, { headers }).then(r => r.text()).catch(() => ''),
+      ]);
+
+      const prompt = generateAIAnalysisPrompt({
+        model: t.Model,
+        latency: t.LatencyMs || 0,
+        ttft: t.TTFTMs,
+        ttfb: t.TTFBMs,
+        inputTokens: t.InputTokens || 0,
+        outputTokens: t.OutputTokens || 0,
+        cachedTokens: t.CachedInputTokens || 0,
+        cacheWriteTokens: t.CacheCreationInputTokens || 0,
+        cost: t.CostUSD || 0,
+        isStream: t.IsStream,
+        status: t.Status,
+        createdAt: t.CreatedAt,
+        requestBody,
+        responseBody,
+      });
+
+      copyToClipboard(prompt);
+      setIsCopying(false);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (err) {
+      setCopyError(err instanceof Error ? err.message : '复制失败');
+      setIsCopying(false);
+    }
+  };
 
   if (q.isLoading) {
     return (
@@ -439,6 +575,33 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
               stream
             </span>
           )}
+
+          {/* AI Analysis Button */}
+          <button
+            type="button"
+            onClick={handleAIAnalysis}
+            disabled={isCopying}
+            className="ml-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                       bg-gradient-to-r from-violet-500 to-indigo-500
+                       hover:from-violet-600 hover:to-indigo-600
+                       text-white text-[11px] font-semibold
+                       shadow-[0_2px_8px_-2px_rgba(139,92,246,0.40)]
+                       hover:shadow-[0_4px_12px_-2px_rgba(139,92,246,0.50)]
+                       transition-all
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            {isCopying ? 'Copying...' : 'AI 分析'}
+          </button>
+          {copySuccess && (
+            <span className="text-[10.5px] text-emerald-600">✓ 已复制到剪贴板</span>
+          )}
+          {copyError && (
+            <span className="text-[10.5px] text-rose-600">{copyError}</span>
+          )}
+
           <span className="ml-auto text-[11px] mono text-ink-4 select-all">{t.ID}</span>
         </div>
 
