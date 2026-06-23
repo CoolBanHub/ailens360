@@ -352,7 +352,12 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
         <>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.input')}</SectionTitle>
-            <BodyViewer traceId={p.spans[0].ID} part="request" mode="request" />
+            <BodyViewer
+              traceId={p.spans[0].ID}
+              part="request"
+              mode="request"
+              cachedInputTokens={p.spans[0].CachedInputTokens}
+            />
           </section>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.output')}</SectionTitle>
@@ -497,7 +502,12 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
       {/* ── Request + Response (the meat) ────────────────────────── */}
       <section className="glass glass-edge p-5">
         <SectionTitle>{tt('detail.section.request')}</SectionTitle>
-        <BodyViewer traceId={t.ID} part="request" mode="request" />
+        <BodyViewer
+          traceId={t.ID}
+          part="request"
+          mode="request"
+          cachedInputTokens={t.CachedInputTokens}
+        />
       </section>
 
       <section className="glass glass-edge p-5">

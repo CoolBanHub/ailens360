@@ -8,7 +8,7 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { copyToClipboard, prettyJSON } from '../lib/fmt';
+import { copyToClipboard, fmtTokens, prettyJSON } from '../lib/fmt';
 import { useT } from '../i18n';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool' | 'developer' | 'function';
@@ -45,6 +45,7 @@ interface Message {
   tool_call_id?: string;
   name?: string;
   function_call?: { name?: string; arguments?: string };
+  cacheEstimate?: CacheEstimate;
 }
 
 interface ChatPayload {
@@ -61,12 +62,29 @@ interface ChatPayload {
   usage?: unknown;
 }
 
+interface ToolDefinition {
+  name: string;
+  type: string;
+  description?: string;
+  schema?: unknown;
+  raw: unknown;
+  cacheControlLabel?: string;
+  cacheEstimate?: CacheEstimate;
+}
+
+interface CacheEstimate {
+  state: 'none' | 'cached' | 'partial';
+  cachedTokens: number;
+  estimatedTokens: number;
+}
+
 interface Props {
   raw: string | null | undefined;
   mode: 'request' | 'response';
+  cachedInputTokens?: number;
 }
 
-export default function ChatViewer({ raw, mode }: Props) {
+export default function ChatViewer({ raw, mode, cachedInputTokens }: Props) {
   const t = useT();
   const [view, setView] = useState<'pretty' | 'raw'>('pretty');
   const parsed = parseJSON(raw);
@@ -77,8 +95,13 @@ export default function ChatViewer({ raw, mode }: Props) {
   // shows the original SSE bytes verbatim for debugging.
   const streamMessages = mode === 'response' ? assembleStream(raw) : [];
   const messages = streamMessages.length > 0 ? streamMessages : extractMessages(parsed, mode);
+  const toolDefinitions = mode === 'request' ? extractToolDefinitions(parsed) : [];
+  const cacheTokens = mode === 'request' ? Math.max(0, cachedInputTokens || 0) : 0;
+  const annotated = mode === 'request'
+    ? annotateCachedPrefix(toolDefinitions, messages, cacheTokens)
+    : { toolDefinitions, messages };
   // Render Pretty only when we found something useful; otherwise default to Raw
-  const canPretty = messages.length > 0;
+  const canPretty = annotated.messages.length > 0 || annotated.toolDefinitions.length > 0;
   const effective = canPretty ? view : 'raw';
 
   return (
@@ -125,7 +148,9 @@ export default function ChatViewer({ raw, mode }: Props) {
 
       {effective === 'pretty' ? (
         <div className="flex flex-col gap-2">
-          {messages.map((m, i) => <MessageBubble key={i} m={m} />)}
+          {cacheTokens > 0 && <CachePrefixNotice tokens={cacheTokens} />}
+          {annotated.messages.map((m, i) => <MessageBubble key={i} m={m} />)}
+          {annotated.toolDefinitions.length > 0 && <ToolDefinitionsPanel tools={annotated.toolDefinitions} />}
         </div>
       ) : (
         <RawBlock raw={raw} />
@@ -566,6 +591,193 @@ function extractRequestMessages(p: ChatPayload): Message[] {
   return out;
 }
 
+function extractToolDefinitions(p: ChatPayload | null): ToolDefinition[] {
+  if (!p) return [];
+  const any = p as any;
+  const out: ToolDefinition[] = [];
+
+  if (Array.isArray(any.tools)) {
+    for (const tool of any.tools) {
+      out.push(...normalizeToolDefinitions(tool, out.length));
+    }
+  }
+
+  // OpenAI legacy chat-completions shape.
+  if (Array.isArray(any.functions)) {
+    for (const fn of any.functions) {
+      out.push(...normalizeToolDefinitions({ type: 'function', function: fn }, out.length));
+    }
+  }
+
+  return out;
+}
+
+function annotateCachedPrefix(
+  tools: ToolDefinition[],
+  messages: Message[],
+  cachedInputTokens: number,
+): { toolDefinitions: ToolDefinition[]; messages: Message[] } {
+  if (cachedInputTokens <= 0) return { toolDefinitions: tools, messages };
+
+  let consumed = 0;
+  const mark = (text: string): CacheEstimate => {
+    const estimatedTokens = estimateTokens(text);
+    const before = consumed;
+    consumed += estimatedTokens;
+    const cachedTokens = Math.max(0, Math.min(consumed, cachedInputTokens) - before);
+    return {
+      state: cachedTokens <= 0 ? 'none' : cachedTokens >= estimatedTokens ? 'cached' : 'partial',
+      cachedTokens,
+      estimatedTokens,
+    };
+  };
+
+  return {
+    toolDefinitions: tools.map((tool) => ({
+      ...tool,
+      cacheEstimate: mark(toolCacheText(tool)),
+    })),
+    messages: messages.map((message) => ({
+      ...message,
+      cacheEstimate: mark(messageCacheText(message)),
+    })),
+  };
+}
+
+function estimateTokens(text: string): number {
+  if (!text.trim()) return 0;
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (/\s/.test(ch)) continue;
+    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(ch)) cjk += 1;
+    else other += 1;
+  }
+  const estimate = cjk + Math.ceil(other / 4);
+  return Math.max(1, estimate);
+}
+
+function toolCacheText(tool: ToolDefinition): string {
+  return stableStringify(tool.raw);
+}
+
+function messageCacheText(message: Message): string {
+  const cacheShape = {
+    role: message.role,
+    name: message.name,
+    content: message.content,
+    tool_call_id: message.tool_call_id,
+    tool_calls: message.tool_calls,
+    function_call: message.function_call,
+  };
+  return stableStringify(cacheShape);
+}
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) return '';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  const obj = value as Record<string, unknown>;
+  return '{' + Object.keys(obj).sort()
+    .filter((key) => obj[key] !== undefined)
+    .map((key) => JSON.stringify(key) + ':' + stableStringify(obj[key]))
+    .join(',') + '}';
+}
+
+function normalizeToolDefinitions(tool: unknown, baseIndex: number): ToolDefinition[] {
+  if (!tool || typeof tool !== 'object') return [];
+  const t = tool as any;
+
+  // Gemini groups multiple callable tools under one `function_declarations`
+  // entry. Flatten them so the header count matches the actual callable count.
+  const declarations: unknown[] | null = Array.isArray(t.function_declarations)
+    ? t.function_declarations as unknown[]
+    : Array.isArray(t.functionDeclarations)
+      ? t.functionDeclarations as unknown[]
+      : null;
+  if (declarations) {
+    return declarations.map((decl: unknown, i: number) =>
+      normalizeSingleToolDefinition(decl, baseIndex + i, tool),
+    ).filter((x): x is ToolDefinition => !!x);
+  }
+
+  const def = normalizeSingleToolDefinition(t.function && typeof t.function === 'object' ? t.function : t, baseIndex, tool);
+  return def ? [def] : [];
+}
+
+function normalizeSingleToolDefinition(item: unknown, index: number, raw: unknown = item): ToolDefinition | null {
+  if (!item || typeof item !== 'object') return null;
+  const v = item as any;
+  const rawObj = raw && typeof raw === 'object' ? raw as any : v;
+  const rawType = typeof rawObj.type === 'string' && rawObj.type.trim()
+    ? rawObj.type
+    : typeof v.type === 'string' && v.type.trim()
+      ? v.type
+      : 'function';
+  const name = firstString(v.name, rawObj.name, rawType) || `tool_${index + 1}`;
+  const description = firstString(v.description, rawObj.description);
+  const schema = firstPresent(
+    v.parameters,
+    v.parametersJsonSchema,
+    v.input_schema,
+    v.inputSchema,
+    rawObj.parameters,
+    rawObj.input_schema,
+    rawObj.inputSchema,
+  );
+  return {
+    name,
+    type: rawType,
+    description,
+    schema,
+    raw,
+    cacheControlLabel: firstCacheControlLabel(raw, item),
+  };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function firstPresent(...values: unknown[]): unknown {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+function firstCacheControlLabel(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const label = cacheControlLabel(findCacheControl(value));
+    if (label) return label;
+  }
+  return undefined;
+}
+
+function findCacheControl(value: unknown, depth = 0): unknown {
+  if (!value || typeof value !== 'object' || depth > 6) return null;
+  const obj = value as any;
+  if (obj.cache_control) return obj.cache_control;
+  if (obj.cacheControl) return obj.cacheControl;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = findCacheControl(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const key of Object.keys(obj)) {
+    const found = findCacheControl(obj[key], depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 function extractResponsesRequest(p: ChatPayload): Message[] {
   const out: Message[] = [];
   const any = p as any;
@@ -655,6 +867,133 @@ const ROLE_TINT: Record<string, string> = {
   function:  'bg-violet-50/70 border-violet-200/60 text-violet-900',
 };
 
+function CachePrefixNotice({ tokens }: { tokens: number }) {
+  return (
+    <div className="rounded-xl border border-emerald-200/80 bg-emerald-50/80 px-3 py-2 text-emerald-950">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-[10px] uppercase tracking-[0.14em] font-bold">cached input</span>
+        <span className="mono text-[11px]">{fmtTokens(tokens)} tokens</span>
+        <span className="text-[11.5px] text-emerald-800/80 truncate">
+          prefix match from upstream usage, estimated below
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ToolDefinitionsPanel({ tools }: { tools: ToolDefinition[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const names = tools.map((tool) => tool.name).filter(Boolean);
+  const cached = tools.filter((tool) => tool.cacheEstimate && tool.cacheEstimate.state !== 'none');
+
+  return (
+    <div className="rounded-2xl border border-cyan-200/75 bg-cyan-50/75 px-3.5 py-2.5 text-cyan-950">
+      <div className="flex items-center gap-2 mb-2 min-w-0 flex-wrap">
+        <span className="text-[10px] uppercase tracking-[0.16em] font-bold">available tools</span>
+        <span className="mono text-[10.5px] opacity-70">{tools.length}</span>
+        {cached.length > 0 && (
+          <span className="inline-flex items-center rounded-full border border-emerald-300/70 bg-emerald-100/75 px-2 py-0.5 text-[10px] font-semibold text-emerald-900">
+            {cached.length} cached
+          </span>
+        )}
+        {tools.some((tool) => tool.cacheControlLabel) && (
+          <span className="inline-flex items-center rounded-full border border-amber-300/70 bg-amber-100/75 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+            cache_control
+          </span>
+        )}
+        {names.length > 0 && (
+          <span className="mono text-[10.5px] opacity-70 truncate">
+            {names.join(', ')}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-1">
+        {tools.map((tool, i) => (
+          <ToolDefinitionCard
+            key={i}
+            tool={tool}
+            isExpanded={expandedId === tool.name}
+            onToggle={() => setExpandedId(expandedId === tool.name ? null : tool.name)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ToolDefinitionCard({ tool, isExpanded, onToggle }: { tool: ToolDefinition; isExpanded: boolean; onToggle: () => void }) {
+  const schema = tool.schema !== undefined ? tool.schema : tool.raw;
+  const params = extractParameterSchema(schema);
+
+  return (
+    <div className="rounded-xl bg-white/60 border border-white/75 overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3 py-1.5 border-b border-[color:var(--glass-line)] bg-white/35 min-w-0 hover:bg-white/50 transition"
+      >
+        <svg
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+          className={`text-cyan-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+        >
+          <path d="M9 6l6 6-6 6"/>
+        </svg>
+        <span className="inline-flex items-center justify-center w-5 h-5 rounded-md
+                         bg-gradient-to-br from-cyan-500 to-indigo-400 text-white text-[10px] font-bold">
+          ƒ
+        </span>
+        <span className="font-semibold text-[12.5px] mono truncate">{tool.name}</span>
+        <span className="rounded-full bg-cyan-100/80 border border-cyan-200/80 px-1.5 py-0.5 text-[10px] mono text-cyan-800">
+          {tool.type}
+        </span>
+        <CacheEstimateBadge estimate={tool.cacheEstimate} />
+        {tool.cacheControlLabel && (
+          <span className="rounded-full bg-amber-100/80 border border-amber-300/80 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
+            cache_control {tool.cacheControlLabel}
+          </span>
+        )}
+        <span className="ml-auto text-[10px] text-cyan-600">
+          {params.length > 0 ? `${params.length} params` : 'no params'}
+        </span>
+      </button>
+
+      {isExpanded && (
+        <div className="p-3">
+          {tool.description && (
+            <div className="mb-3 text-[12.5px] leading-relaxed text-cyan-950/85 break-words">
+              {tool.description}
+            </div>
+          )}
+          {params.length > 0 ? (
+            <ParameterTable parameters={params} />
+          ) : (
+            <div className="text-xs text-ink-4 italic">No parameters defined</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CacheEstimateBadge({ estimate }: { estimate?: CacheEstimate }) {
+  if (!estimate || estimate.state === 'none') return null;
+  const full = estimate.state === 'cached';
+  const label = full
+    ? `cached ${fmtTokens(estimate.cachedTokens)}`
+    : `partial cached ${fmtTokens(estimate.cachedTokens)}/${fmtTokens(estimate.estimatedTokens)}`;
+  return (
+    <span className={
+      'rounded-full px-1.5 py-0.5 text-[10px] font-semibold border ' +
+      (full
+        ? 'bg-emerald-100/80 border-emerald-300/80 text-emerald-900'
+        : 'bg-lime-100/80 border-lime-300/80 text-lime-900')
+    }>
+      {label}
+    </span>
+  );
+}
+
 function MessageBubble({ m }: { m: Message }) {
   const role = (m.role || 'user').toLowerCase();
   const tint = ROLE_TINT[role] || 'bg-white/55 border-white/70 text-ink';
@@ -678,6 +1017,7 @@ function MessageBubble({ m }: { m: Message }) {
         {m.tool_call_id && (
           <span className="mono text-[10.5px] opacity-70">→ {m.tool_call_id}</span>
         )}
+        <CacheEstimateBadge estimate={m.cacheEstimate} />
       </div>
 
       {reasoning && (
@@ -926,10 +1266,32 @@ function ImagePart({ url }: { url: string }) {
 }
 
 function ToolCallCard({ tc }: { tc: ToolCall }) {
+  const [showRaw, setShowRaw] = useState(false);
   const name = tc.function?.name || tc.name || '(tool)';
   const argsRaw = tc.function?.arguments ?? (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {}, null, 2));
-  let argsPretty = argsRaw;
-  try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch { /* keep raw */ }
+  let argsObj: Record<string, unknown> | null = null;
+  try { argsObj = JSON.parse(argsRaw); } catch { /* ignore */ }
+
+  // If no structured args, show as-is
+  if (!argsObj || typeof argsObj !== 'object') {
+    return (
+      <div className="rounded-xl bg-white/60 border border-white/75 overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[color:var(--glass-line)] bg-white/35">
+          <span className="inline-flex items-center justify-center w-5 h-5 rounded-md
+                           bg-gradient-to-br from-violet-400 to-indigo-400 text-white text-[10px] font-bold">
+            ƒ
+          </span>
+          <span className="font-semibold text-[12.5px] mono">{name}</span>
+          {tc.id && <span className="ml-auto mono text-[10.5px] text-ink-4 truncate max-w-[200px]">{tc.id}</span>}
+        </div>
+        <pre className="codeblock !rounded-none !border-0 !max-h-[280px]">{formatUnknown(argsRaw)}</pre>
+      </div>
+    );
+  }
+
+  // Structured args - show as pretty key-value pairs
+  const entries = Object.entries(argsObj);
+  const isMultiline = entries.length > 1 || entries.some(([, v]) => typeof v === 'object' && v !== null);
 
   return (
     <div className="rounded-xl bg-white/60 border border-white/75 overflow-hidden">
@@ -940,8 +1302,183 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
         </span>
         <span className="font-semibold text-[12.5px] mono">{name}</span>
         {tc.id && <span className="ml-auto mono text-[10.5px] text-ink-4 truncate max-w-[200px]">{tc.id}</span>}
+        {entries.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowRaw((v) => !v)}
+            className="ml-2 px-2 py-0.5 rounded bg-slate-100/80 hover:bg-slate-200/80 text-[10px] mono text-ink-3 transition"
+          >
+            {showRaw ? '{ } pretty' : '{ } raw'}
+          </button>
+        )}
       </div>
-      <pre className="codeblock !rounded-none !border-0 !max-h-[280px]">{argsPretty}</pre>
+
+      {showRaw ? (
+        <pre className="codeblock !rounded-none !border-0 !max-h-[280px]">{formatUnknown(argsRaw)}</pre>
+      ) : (
+        <div className="p-3 space-y-1.5 max-h-[280px] overflow-auto">
+          {entries.length === 0 && <span className="text-ink-4 text-xs italic">(no arguments)</span>}
+          {entries.map(([key, value]) => (
+            <div key={key} className={isMultiline ? 'flex flex-col gap-0.5' : 'flex items-center gap-2'}>
+              <span className="mono text-[11px] font-semibold text-violet-700">{key}:</span>
+              <ParamValue value={value} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParamValue({ value }: { value: unknown }) {
+  if (value === null) return <span className="text-[12px] text-ink-4 italic">null</span>;
+  if (value === undefined) return <span className="text-[12px] text-ink-4 italic">undefined</span>;
+  if (typeof value === 'boolean') return <span className="text-[12px] text-blue-700 font-semibold">{String(value)}</span>;
+  if (typeof value === 'number') return <span className="text-[12px] mono text-blue-700">{value}</span>;
+  if (typeof value === 'string') {
+    // If it's a long string or multiline, truncate
+    if (value.length > 120 || value.includes('\n')) {
+      return (
+        <div className="text-[12px] text-ink-2 break-words max-h-[120px] overflow-auto">
+          <span className="text-slate-500">"</span>
+          <span className="text-slate-700">{value}</span>
+          <span className="text-slate-500">"</span>
+        </div>
+      );
+    }
+    return (
+      <span className="text-[12px] text-ink-2 break-words">
+        <span className="text-slate-500">"</span>
+        <span className="text-slate-700">{value}</span>
+        <span className="text-slate-500">"</span>
+      </span>
+    );
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-[12px] text-ink-4 italic">[]</span>;
+    return (
+      <div className="pl-2 border-l-2 border-violet-200">
+        {value.map((item, i) => (
+          <div key={i} className="py-0.5">
+            <span className="mono text-[10px] text-ink-4">{i}:</span>
+            <span className="ml-2"><ParamValue value={item} /></span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return <span className="text-[12px] text-ink-4 italic">{'{ }'}</span>;
+    return (
+      <div className="pl-2 border-l-2 border-violet-200">
+        {entries.map(([k, v]) => (
+          <div key={k} className="py-0.5">
+            <span className="mono text-[11px] font-semibold text-violet-700">{k}:</span>
+            <span className="ml-2"><ParamValue value={v} /></span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <span className="text-[12px] text-ink-2">{String(value)}</span>;
+}
+
+function formatUnknown(value: unknown): string {
+  if (typeof value === 'string') {
+    try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
+  }
+  try { return JSON.stringify(value ?? {}, null, 2); } catch { return String(value); }
+}
+
+interface ParameterInfo {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string;
+  defaultValue?: unknown;
+}
+
+// Extract parameters from various schema formats (OpenAI, Anthropic, etc.)
+function extractParameterSchema(schema: unknown): ParameterInfo[] {
+  if (!schema || typeof schema !== 'object') return [];
+  const s = schema as Record<string, unknown>;
+
+  // Try to find properties object in various locations
+  const properties =
+    (typeof s.properties === 'object' && s.properties !== null ? s.properties : null) ||
+    (typeof s.parameters === 'object' && s.parameters !== null ? (s.parameters as Record<string, unknown>).properties : null) ||
+    (typeof s.input_schema === 'object' && s.input_schema !== null ? (s.input_schema as Record<string, unknown>).properties : null);
+
+  if (!properties || typeof properties !== 'object') return [];
+
+  const requiredList = new Set<string>();
+  const requiredRaw =
+    s.required ??
+    (s.parameters as Record<string, unknown>)?.required ??
+    (s.input_schema as Record<string, unknown>)?.required;
+  if (Array.isArray(requiredRaw)) {
+    for (const r of requiredRaw) if (typeof r === 'string') requiredList.add(r);
+  }
+
+  const out: ParameterInfo[] = [];
+  for (const [name, prop] of Object.entries(properties)) {
+    if (!prop || typeof prop !== 'object') continue;
+    const p = prop as Record<string, unknown>;
+    const type = inferParameterType(p);
+    out.push({
+      name,
+      type,
+      required: requiredList.has(name),
+      description: typeof p.description === 'string' ? p.description : undefined,
+      defaultValue: p.default,
+    });
+  }
+  return out;
+}
+
+function inferParameterType(prop: Record<string, unknown>): string {
+  if (typeof prop.type === 'string') return prop.type;
+  if (prop.enum && Array.isArray(prop.enum)) return 'enum';
+  if (prop.$ref && typeof prop.$ref === 'string') return 'ref';
+  return 'any';
+}
+
+function ParameterTable({ parameters }: { parameters: ParameterInfo[] }) {
+  return (
+    <div className="rounded-lg border border-cyan-200/60 bg-white/50 overflow-hidden">
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="bg-cyan-100/60 border-b border-cyan-200/70">
+            <th className="px-2 py-1 text-left font-semibold text-cyan-900">Name</th>
+            <th className="px-2 py-1 text-left font-semibold text-cyan-900">Type</th>
+            <th className="px-2 py-1 text-center font-semibold text-cyan-900">Required</th>
+            <th className="px-2 py-1 text-left font-semibold text-cyan-900">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {parameters.map((param, i) => (
+            <tr key={i} className="border-b border-cyan-100/50 last:border-0">
+              <td className="px-2 py-1.5 mono text-cyan-900 font-medium">{param.name}</td>
+              <td className="px-2 py-1.5">
+                <span className="inline-flex items-center rounded bg-cyan-100/80 px-1.5 py-0.5 mono text-cyan-800 text-[10px]">
+                  {param.type}
+                </span>
+              </td>
+              <td className="px-2 py-1.5 text-center">
+                {param.required ? (
+                  <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-rose-100/80 border border-rose-300/70 text-rose-700 text-[9px] font-bold">✓</span>
+                ) : (
+                  <span className="text-ink-4 text-[10px]">—</span>
+                )}
+              </td>
+              <td className="px-2 py-1.5 text-ink-2 max-w-[300px] break-words">
+                {param.description || <span className="text-ink-4 italic">—</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

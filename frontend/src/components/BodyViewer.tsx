@@ -12,9 +12,10 @@ interface Props {
   traceId: string;
   part: 'request' | 'response';
   mode: 'request' | 'response';
+  cachedInputTokens?: number;
 }
 
-export default function BodyViewer({ traceId, part, mode }: Props) {
+export default function BodyViewer({ traceId, part, mode, cachedInputTokens }: Props) {
   const tt = useT();
 
   const q = useQuery({
@@ -60,5 +61,5 @@ export default function BodyViewer({ traceId, part, mode }: Props) {
       </div>
     );
   }
-  return <ChatViewer raw={q.data?.text || ''} mode={mode} />;
+  return <ChatViewer raw={q.data?.text || ''} mode={mode} cachedInputTokens={cachedInputTokens} />;
 }
