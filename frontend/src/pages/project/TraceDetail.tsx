@@ -443,6 +443,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
               traceId={p.spans[0].ID}
               part="request"
               mode="request"
+              model={p.spans[0].Model}
               cachedInputTokens={p.spans[0].CachedInputTokens}
             />
           </section>
@@ -669,6 +670,7 @@ function SpanDetailPanel({ spanId, projectId, showTraceMeta }: { spanId: string;
           traceId={t.ID}
           part="request"
           mode="request"
+          model={t.Model}
           cachedInputTokens={t.CachedInputTokens}
         />
       </section>

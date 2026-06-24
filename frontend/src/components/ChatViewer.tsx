@@ -5,11 +5,15 @@
 //
 // Usage: <ChatViewer raw={t.RequestBody} mode="request" /> or mode="response".
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { copyToClipboard, fmtTokens, prettyJSON } from '../lib/fmt';
 import { useT } from '../i18n';
+import {
+  estimateRequestTokenSegments,
+  type RequestTokenSegments,
+} from '../lib/chatTokenEstimator';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool' | 'developer' | 'function';
 
@@ -81,12 +85,14 @@ interface CacheEstimate {
 interface Props {
   raw: string | null | undefined;
   mode: 'request' | 'response';
+  model?: string;
   cachedInputTokens?: number;
 }
 
-export default function ChatViewer({ raw, mode, cachedInputTokens }: Props) {
+export default function ChatViewer({ raw, mode, model = '', cachedInputTokens }: Props) {
   const t = useT();
   const [view, setView] = useState<'pretty' | 'raw'>('pretty');
+  const [segments, setSegments] = useState<RequestTokenSegments | null>(null);
   const parsed = parseJSON(raw);
 
   // Streaming responses arrive as raw SSE (`data: {...}\n\n` frames) in `raw`.
@@ -97,8 +103,28 @@ export default function ChatViewer({ raw, mode, cachedInputTokens }: Props) {
   const messages = streamMessages.length > 0 ? streamMessages : extractMessages(parsed, mode);
   const toolDefinitions = mode === 'request' ? extractToolDefinitions(parsed) : [];
   const cacheTokens = mode === 'request' ? Math.max(0, cachedInputTokens || 0) : 0;
+  const effectiveModel = model || (typeof parsed?.model === 'string' ? parsed.model : '');
+
+  useEffect(() => {
+    let cancelled = false;
+    setSegments(null);
+    if (mode !== 'request' || cacheTokens <= 0) return;
+
+    estimateRequestTokenSegments(effectiveModel, toolDefinitions, messages)
+      .then((next) => {
+        if (!cancelled) setSegments(next);
+      })
+      .catch(() => {
+        if (!cancelled) setSegments(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, cacheTokens, effectiveModel, raw]);
+
   const annotated = mode === 'request'
-    ? annotateCachedPrefix(toolDefinitions, messages, cacheTokens)
+    ? annotateCachedPrefix(toolDefinitions, messages, cacheTokens, segments)
     : { toolDefinitions, messages };
   // Render Pretty only when we found something useful; otherwise default to Raw
   const canPretty = annotated.messages.length > 0 || annotated.toolDefinitions.length > 0;
@@ -616,15 +642,15 @@ function annotateCachedPrefix(
   tools: ToolDefinition[],
   messages: Message[],
   cachedInputTokens: number,
+  segments: RequestTokenSegments | null,
 ): { toolDefinitions: ToolDefinition[]; messages: Message[] } {
-  if (cachedInputTokens <= 0) return { toolDefinitions: tools, messages };
+  if (cachedInputTokens <= 0 || !segments) return { toolDefinitions: tools, messages };
 
   let consumed = 0;
-  const mark = (text: string): CacheEstimate => {
-    const estimatedTokens = estimateTokens(text);
+  const mark = (estimatedTokens: number): CacheEstimate => {
     const before = consumed;
     consumed += estimatedTokens;
-    const cachedTokens = Math.max(0, Math.min(consumed, cachedInputTokens) - before);
+    const cachedTokens = before >= cachedInputTokens ? 0 : Math.min(consumed, cachedInputTokens) - before;
     return {
       state: cachedTokens <= 0 ? 'none' : cachedTokens >= estimatedTokens ? 'cached' : 'partial',
       cachedTokens,
@@ -633,57 +659,15 @@ function annotateCachedPrefix(
   };
 
   return {
-    toolDefinitions: tools.map((tool) => ({
+    toolDefinitions: tools.map((tool, index) => ({
       ...tool,
-      cacheEstimate: mark(toolCacheText(tool)),
+      cacheEstimate: mark(segments.toolTokens[index] || 0),
     })),
-    messages: messages.map((message) => ({
+    messages: messages.map((message, index) => ({
       ...message,
-      cacheEstimate: mark(messageCacheText(message)),
+      cacheEstimate: mark(segments.messageTokens[index] || 0),
     })),
   };
-}
-
-function estimateTokens(text: string): number {
-  if (!text.trim()) return 0;
-  let cjk = 0;
-  let other = 0;
-  for (const ch of text) {
-    if (/\s/.test(ch)) continue;
-    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(ch)) cjk += 1;
-    else other += 1;
-  }
-  const estimate = cjk + Math.ceil(other / 4);
-  return Math.max(1, estimate);
-}
-
-function toolCacheText(tool: ToolDefinition): string {
-  return stableStringify(tool.raw);
-}
-
-function messageCacheText(message: Message): string {
-  const cacheShape = {
-    role: message.role,
-    name: message.name,
-    content: message.content,
-    tool_call_id: message.tool_call_id,
-    tool_calls: message.tool_calls,
-    function_call: message.function_call,
-  };
-  return stableStringify(cacheShape);
-}
-
-function stableStringify(value: unknown): string {
-  if (value === undefined) return '';
-  if (value === null) return 'null';
-  if (typeof value === 'string') return JSON.stringify(value);
-  if (typeof value !== 'object') return String(value);
-  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
-  const obj = value as Record<string, unknown>;
-  return '{' + Object.keys(obj).sort()
-    .filter((key) => obj[key] !== undefined)
-    .map((key) => JSON.stringify(key) + ':' + stableStringify(obj[key]))
-    .join(',') + '}';
 }
 
 function normalizeToolDefinitions(tool: unknown, baseIndex: number): ToolDefinition[] {
@@ -994,9 +978,61 @@ function CacheEstimateBadge({ estimate }: { estimate?: CacheEstimate }) {
   );
 }
 
+// 为每个消息显示详细的缓存统计信息
+function MessageCacheStats({ estimate }: { estimate?: CacheEstimate }) {
+  if (!estimate || estimate.state === 'none') return null;
+
+  const full = estimate.state === 'cached';
+  const isPartial = estimate.state === 'partial';
+
+  if (full) {
+    return (
+      <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-100/80 border border-emerald-300/80">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-emerald-700">
+          <path d="M5 13l4 4L19 7"/>
+        </svg>
+        <span className="text-[10px] font-semibold text-emerald-900">
+          {fmtTokens(estimate.cachedTokens)} 缓存 / {fmtTokens(estimate.estimatedTokens)} 总计
+        </span>
+      </div>
+    );
+  }
+
+  if (isPartial) {
+    return (
+      <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-100/80 border border-amber-300/80">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-amber-700">
+          <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-2.312-3.401-3-4-1.384-1.215-2.602-1.016-3-1-3.783 1.148-5 3.5-5 5.5a7 7 0 1 0 14 0c0-2-1.217-4.352-5-5.5-.398-.016-1.616-.215-3 1z"/>
+          <path d="M11.5 14.5A2.5 2.5 0 0 1 14 12c0-1.38-.5-2-1-3-1.072-2.143-2.312-3.401-3-4-1.384-1.215-2.602-1.016-3-1-3.783 1.148-5 3.5-5 5.5a7 7 0 1 0 14 0c0-2-1.217-4.352-5-5.5-.398-.016-1.616-.215-3 1z"/>
+        </svg>
+        <span className="text-[10px] font-semibold text-amber-900">
+          {fmtTokens(estimate.cachedTokens)} 缓存 / {fmtTokens(estimate.estimatedTokens)} 总计
+        </span>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function MessageBubble({ m }: { m: Message }) {
   const role = (m.role || 'user').toLowerCase();
-  const tint = ROLE_TINT[role] || 'bg-white/55 border-white/70 text-ink';
+  const cacheState = m.cacheEstimate?.state || 'none';
+  const isCached = cacheState === 'cached';
+  const isPartialCached = cacheState === 'partial';
+
+  // 当内容完全缓存时，使用不同的色调
+  const getCachedTint = (baseTint: string) => {
+    if (isCached) {
+      return 'bg-emerald-100/90 border-emerald-300/90 text-emerald-950';
+    }
+    if (isPartialCached) {
+      return 'bg-lime-50/80 border-lime-200/80 text-ink';
+    }
+    return baseTint;
+  };
+
+  const tint = getCachedTint(ROLE_TINT[role] || 'bg-white/55 border-white/70 text-ink');
   const reasoning = typeof m.reasoning_content === 'string' && m.reasoning_content.trim()
     ? m.reasoning_content
     : '';
@@ -1017,7 +1053,9 @@ function MessageBubble({ m }: { m: Message }) {
         {m.tool_call_id && (
           <span className="mono text-[10.5px] opacity-70">→ {m.tool_call_id}</span>
         )}
-        <CacheEstimateBadge estimate={m.cacheEstimate} />
+        <div className="ml-auto">
+          <MessageCacheStats estimate={m.cacheEstimate} />
+        </div>
       </div>
 
       {reasoning && (
@@ -1025,7 +1063,7 @@ function MessageBubble({ m }: { m: Message }) {
           <div className="text-[10px] uppercase tracking-[0.14em] text-zinc-600/90 font-semibold mb-1">
             reasoning
           </div>
-          <TextBlock>{reasoning}</TextBlock>
+          <TextBlock cacheState={cacheState}>{reasoning}</TextBlock>
         </div>
       )}
 
@@ -1034,10 +1072,10 @@ function MessageBubble({ m }: { m: Message }) {
           <div className="text-[10px] uppercase tracking-[0.14em] text-emerald-700/80 font-semibold mb-1">
             content
           </div>
-          <ContentRenderer content={m.content} role={role} />
+          <ContentRenderer content={m.content} role={role} cacheState={cacheState} />
         </div>
       ) : shouldRenderContent ? (
-        <ContentRenderer content={m.content} role={role} />
+        <ContentRenderer content={m.content} role={role} cacheState={cacheState} />
       ) : null}
 
       {/* OpenAI: tool_calls on assistant messages */}
@@ -1070,23 +1108,23 @@ function hasRenderableContent(content: Message['content']): boolean {
   return content.length > 0;
 }
 
-function ContentRenderer({ content, role }: { content: Message['content']; role: string }) {
+function ContentRenderer({ content, role, cacheState }: { content: Message['content']; role: string; cacheState?: 'none' | 'cached' | 'partial' }) {
   if (content == null) return null;
 
   if (typeof content === 'string') {
     if (!content.trim()) return <span className="text-ink-4 italic text-[12.5px]">(empty)</span>;
-    return <TextBlock role={role}>{content}</TextBlock>;
+    return <TextBlock role={role} cacheState={cacheState}>{content}</TextBlock>;
   }
 
   // array of parts (multimodal / anthropic blocks)
   return (
     <div className="flex flex-col gap-1.5">
-      {content.map((part, i) => <ContentPartView key={i} part={part} />)}
+      {content.map((part, i) => <ContentPartView key={i} part={part} cacheState={cacheState} />)}
     </div>
   );
 }
 
-function ContentPartView({ part }: { part: ContentPart }) {
+function ContentPartView({ part, cacheState }: { part: ContentPart; cacheState?: 'none' | 'cached' | 'partial' }) {
   const type = (part.type || '').toLowerCase();
 
   // Text part (OpenAI: type=text; Anthropic: type=text)
@@ -1098,11 +1136,11 @@ function ContentPartView({ part }: { part: ContentPart }) {
           <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
             text <span className="mono normal-case opacity-70">· cache_control {cacheControl}</span>
           </div>
-          <TextBlock>{part.text}</TextBlock>
+          <TextBlock cacheState={cacheState}>{part.text}</TextBlock>
         </div>
       );
     }
-    return <TextBlock>{part.text}</TextBlock>;
+    return <TextBlock cacheState={cacheState}>{part.text}</TextBlock>;
   }
 
   // OpenAI image_url part
@@ -1172,12 +1210,23 @@ const COLLAPSE_PREVIEW_LINES = 8;
 
 const MARKDOWN_ROLES = new Set(['user', 'assistant']);
 
-function TextBlock({ children, role }: { children: string; role?: string }) {
+function TextBlock({ children, role, cacheState }: { children: string; role?: string; cacheState?: 'none' | 'cached' | 'partial' }) {
   const t = useT();
   const lineCount = children.split('\n').length;
   const needsCollapse = children.length > COLLAPSE_MIN_CHARS || lineCount > COLLAPSE_MIN_LINES;
   const [expanded, setExpanded] = useState(false);
   const useMarkdown = !!role && MARKDOWN_ROLES.has(role);
+  const isCached = cacheState === 'cached';
+  const isPartialCached = cacheState === 'partial';
+
+  // 根据缓存状态获取文本颜色
+  const getTextColor = () => {
+    if (isCached) return 'text-emerald-800';
+    if (isPartialCached) return 'text-lime-800';
+    return '';
+  };
+
+  const textColor = getTextColor();
 
   const renderText = (text: string) => {
     if (useMarkdown) {
@@ -1193,28 +1242,43 @@ function TextBlock({ children, role }: { children: string; role?: string }) {
               return isBlock ? (
                 <code className={className} {...props}>{children}</code>
               ) : (
-                <code className="px-1 py-0.5 rounded bg-black/5 text-[12.5px] font-mono" {...props}>{children}</code>
+                <code className={
+                  (isCached ? 'bg-emerald-100 text-emerald-900' :
+                   isPartialCached ? 'bg-lime-100 text-lime-900' :
+                   'bg-black/5') +
+                  ' px-1 py-0.5 rounded text-[12.5px] font-mono'
+                } {...props}>{children}</code>
               );
             },
-            p: ({ children }) => <p className="mb-1.5 last:mb-0">{children}</p>,
+            p: ({ children }) => <p className={'mb-1.5 last:mb-0 ' + textColor}>{children}</p>,
             ul: ({ children }) => <ul className="list-disc pl-5 mb-1.5 space-y-0.5">{children}</ul>,
             ol: ({ children }) => <ol className="list-decimal pl-5 mb-1.5 space-y-0.5">{children}</ol>,
             blockquote: ({ children }) => (
-              <blockquote className="border-l-3 border-current/20 pl-3 my-1.5 opacity-85">{children}</blockquote>
+              <blockquote className={
+                'border-l-3 pl-3 my-1.5 opacity-85 ' +
+                (isCached ? 'border-emerald-400/40 text-emerald-800' :
+                 isPartialCached ? 'border-lime-400/40 text-lime-800' :
+                 'border-current/20')
+              }>{children}</blockquote>
             ),
-            h1: ({ children }) => <h1 className="text-lg font-bold mb-1.5">{children}</h1>,
-            h2: ({ children }) => <h2 className="text-base font-bold mb-1">{children}</h2>,
-            h3: ({ children }) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
+            h1: ({ children }) => <h1 className={'text-lg font-bold mb-1.5 ' + textColor}>{children}</h1>,
+            h2: ({ children }) => <h2 className={'text-base font-bold mb-1 ' + textColor}>{children}</h2>,
+            h3: ({ children }) => <h3 className={'text-sm font-bold mb-1 ' + textColor}>{children}</h3>,
             table: ({ children }) => (
               <div className="overflow-x-auto my-1.5">
                 <table className="text-[12px] border-collapse border border-black/10">{children}</table>
               </div>
             ),
             th: ({ children }) => (
-              <th className="border border-black/10 px-2 py-1 bg-black/5 font-semibold text-left">{children}</th>
+              <th className={
+                'border border-black/10 px-2 py-1 font-semibold text-left ' +
+                (isCached ? 'bg-emerald-100/80 text-emerald-900' :
+                 isPartialCached ? 'bg-lime-100/80 text-lime-900' :
+                 'bg-black/5')
+              }>{children}</th>
             ),
             td: ({ children }) => (
-              <td className="border border-black/10 px-2 py-1">{children}</td>
+              <td className={'border border-black/10 px-2 py-1 ' + textColor}>{children}</td>
             ),
           }}
         >
@@ -1222,12 +1286,12 @@ function TextBlock({ children, role }: { children: string; role?: string }) {
         </Markdown>
       );
     }
-    return <>{text}</>;
+    return <span className={textColor}>{text}</span>;
   };
 
   if (!needsCollapse) {
     return (
-      <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap')}>
+      <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap') + ' ' + textColor}>
         {renderText(children)}
       </div>
     );
@@ -1240,7 +1304,7 @@ function TextBlock({ children, role }: { children: string; role?: string }) {
   const remaining = children.length - preview.length;
 
   return (
-    <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap')}>
+    <div className={'text-[13px] leading-relaxed break-words' + (useMarkdown ? '' : ' whitespace-pre-wrap') + ' ' + textColor}>
       {renderText(expanded ? children : preview)}
       <button
         type="button"
