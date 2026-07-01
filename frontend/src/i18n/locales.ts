@@ -224,6 +224,8 @@ export const zh = {
   'detail.noData':           '没有数据',
   'detail.text.expand':      '…展开（还有 {count} 个字符）',
   'detail.text.collapse':    '收起',
+  'detail.chat.thinking':    '思考过程',
+  'detail.chat.expand':      '展开',
 
   // project settings
   'settings.section.basic':       '基本信息',
@@ -506,6 +508,8 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.noData':           'No data',
   'detail.text.expand':      '…expand ({count} more characters)',
   'detail.text.collapse':    'collapse',
+  'detail.chat.thinking':    'Reasoning',
+  'detail.chat.expand':      'Expand',
 
   'settings.section.basic':       'Basics',
   'settings.basic.hint':          'The project name is for display only.',

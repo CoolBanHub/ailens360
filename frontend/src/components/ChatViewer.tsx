@@ -5,7 +5,7 @@
 //
 // Usage: <ChatViewer raw={t.RequestBody} mode="request" /> or mode="response".
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { copyToClipboard, fmtTokens, prettyJSON } from '../lib/fmt';
@@ -175,7 +175,9 @@ export default function ChatViewer({ raw, mode, model = '', cachedInputTokens }:
       {effective === 'pretty' ? (
         <div className="flex flex-col gap-2">
           {cacheTokens > 0 && <CachePrefixNotice tokens={cacheTokens} />}
-          {annotated.messages.map((m, i) => <MessageBubble key={i} m={m} />)}
+          {annotated.messages.map((m, i) => (
+            <MessageBubble key={i} m={m} mode={mode} />
+          ))}
           {annotated.toolDefinitions.length > 0 && <ToolDefinitionsPanel tools={annotated.toolDefinitions} />}
         </div>
       ) : (
@@ -566,7 +568,12 @@ function assembleAnthropicStream(frames: Array<{ event: string; obj: Record<stri
       } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
         const part = partFor(idx);
         part.type = 'tool_use';
-        part.input = String(part.input || '') + delta.partial_json;
+        // `part.input` is seeded as `{}` at content_block_start (Anthropic
+        // streams the real input as input_json_delta fragments). Coerce to a
+        // string before concatenating, otherwise String({}) prepends a
+        // literal "[object Object]" to the assembled JSON.
+        const base = typeof part.input === 'string' ? part.input : '';
+        part.input = base + delta.partial_json;
       }
     }
   }
@@ -842,13 +849,65 @@ function normalizeResponsesContent(content: any): Message['content'] | null {
   return parts;
 }
 
-const ROLE_TINT: Record<string, string> = {
-  system:    'bg-amber-50/70  border-amber-200/60  text-amber-900',
-  developer: 'bg-amber-50/70  border-amber-200/60  text-amber-900',
-  user:      'bg-blue-100/80    border-blue-300/70    text-blue-950',
-  assistant: 'bg-fuchsia-50/80  border-fuchsia-300/60 text-fuchsia-950',
-  tool:      'bg-violet-50/70 border-violet-200/60 text-violet-900',
-  function:  'bg-violet-50/70 border-violet-200/60 text-violet-900',
+interface RoleVisual {
+  label: string;
+  align: string;
+  bubble: string;
+  shell: string;
+  icon: string;
+}
+
+const ROLE_VISUAL: Record<string, RoleVisual> = {
+  system: {
+    label: 'System',
+    align: 'justify-start',
+    bubble: 'w-full sm:w-[82%] max-w-[720px]',
+    shell: 'bg-slate-50/90 border-slate-200/85 text-slate-950 shadow-[0_18px_42px_-28px_rgba(15,23,42,0.45)]',
+    icon: 'bg-slate-700 text-white',
+  },
+  developer: {
+    label: 'Developer',
+    align: 'justify-start',
+    bubble: 'w-full sm:w-[82%] max-w-[720px]',
+    shell: 'bg-amber-50/90 border-amber-200/85 text-amber-950 shadow-[0_18px_42px_-28px_rgba(180,83,9,0.45)]',
+    icon: 'bg-amber-500 text-white',
+  },
+  user: {
+    label: 'User',
+    align: 'justify-end',
+    bubble: 'w-full sm:w-[72%] max-w-[660px]',
+    shell: 'bg-amber-50/90 border-amber-200/85 text-amber-950 shadow-[0_18px_42px_-28px_rgba(217,119,6,0.50)]',
+    icon: 'bg-orange-500 text-white',
+  },
+  assistant: {
+    label: 'Assistant',
+    align: 'justify-start',
+    bubble: 'w-full sm:w-[78%] max-w-[720px]',
+    shell: 'bg-blue-50/90 border-blue-200/90 text-blue-950 shadow-[0_18px_42px_-28px_rgba(37,99,235,0.45)]',
+    icon: 'bg-blue-500 text-white',
+  },
+  tool: {
+    label: 'Tool',
+    align: 'justify-start',
+    bubble: 'w-full sm:w-[78%] max-w-[720px]',
+    shell: 'bg-violet-50/90 border-violet-200/85 text-violet-950 shadow-[0_18px_42px_-28px_rgba(109,40,217,0.45)]',
+    icon: 'bg-violet-500 text-white',
+  },
+  function: {
+    label: 'Function',
+    align: 'justify-start',
+    bubble: 'w-full sm:w-[78%] max-w-[720px]',
+    shell: 'bg-violet-50/90 border-violet-200/85 text-violet-950 shadow-[0_18px_42px_-28px_rgba(109,40,217,0.45)]',
+    icon: 'bg-violet-500 text-white',
+  },
+};
+
+const FALLBACK_ROLE_VISUAL: RoleVisual = {
+  label: 'Message',
+  align: 'justify-start',
+  bubble: 'w-full sm:w-[78%] max-w-[720px]',
+  shell: 'bg-white/80 border-white/90 text-ink shadow-[0_18px_42px_-30px_rgba(15,23,42,0.42)]',
+  icon: 'bg-slate-500 text-white',
 };
 
 function CachePrefixNotice({ tokens }: { tokens: number }) {
@@ -1015,24 +1074,11 @@ function MessageCacheStats({ estimate }: { estimate?: CacheEstimate }) {
   return null;
 }
 
-function MessageBubble({ m }: { m: Message }) {
-  const role = (m.role || 'user').toLowerCase();
+function MessageBubble({ m, mode }: { m: Message; mode: 'request' | 'response' }) {
+  const role = (m.role || (mode === 'response' ? 'assistant' : 'user')).toLowerCase();
+  const baseVisual = ROLE_VISUAL[role] || FALLBACK_ROLE_VISUAL;
+  const visual = ROLE_VISUAL[role] ? baseVisual : { ...baseVisual, label: titleCase(role) };
   const cacheState = m.cacheEstimate?.state || 'none';
-  const isCached = cacheState === 'cached';
-  const isPartialCached = cacheState === 'partial';
-
-  // 当内容完全缓存时，使用不同的色调
-  const getCachedTint = (baseTint: string) => {
-    if (isCached) {
-      return 'bg-emerald-100/90 border-emerald-300/90 text-emerald-950';
-    }
-    if (isPartialCached) {
-      return 'bg-lime-50/80 border-lime-200/80 text-ink';
-    }
-    return baseTint;
-  };
-
-  const tint = getCachedTint(ROLE_TINT[role] || 'bg-white/55 border-white/70 text-ink');
   const reasoning = typeof m.reasoning_content === 'string' && m.reasoning_content.trim()
     ? m.reasoning_content
     : '';
@@ -1040,66 +1086,157 @@ function MessageBubble({ m }: { m: Message }) {
   const hasToolCalls = toolCalls.length > 0;
   const hasFunctionCall = !!m.function_call;
   const hasAuxiliaryOutput = !!reasoning || hasToolCalls || hasFunctionCall;
-  const renderContentAsBlock = !!reasoning && hasRenderableContent(m.content);
   const shouldRenderContent = hasRenderableContent(m.content) || !hasAuxiliaryOutput;
+  const cacheRing = cacheState === 'cached'
+    ? ' ring-2 ring-emerald-300/80'
+    : cacheState === 'partial'
+      ? ' ring-2 ring-lime-300/70'
+      : '';
 
   return (
-    <div className={'rounded-2xl border px-3.5 py-2.5 ' + tint}>
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="text-[10px] uppercase tracking-[0.16em] font-bold">{role}</span>
-        {m.name && (
-          <span className="mono text-[10.5px] opacity-70">{m.name}</span>
+    <div className={'flex w-full ' + visual.align}>
+      <article
+        className={
+          'min-w-0 max-w-full ' + visual.bubble +
+          ' rounded-[20px] border px-4 py-3 sm:px-5 ' +
+          'transition-shadow ' + visual.shell + cacheRing
+        }
+      >
+        {/* identity row — just who's talking, nothing else */}
+        <div className="mb-2 flex items-center gap-2.5">
+          <span className={'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full shadow-[0_1px_0_rgba(255,255,255,0.35)_inset] ' + visual.icon}>
+            <RoleIcon role={role} />
+          </span>
+          <span className="truncate text-[13px] font-bold leading-tight text-ink-2">{visual.label}</span>
+          {m.name && <span className="mono truncate text-[11px] text-ink-4">{m.name}</span>}
+          {m.tool_call_id && <span className="mono hidden truncate text-[11px] text-ink-4 sm:inline">← {shortId(m.tool_call_id)}</span>}
+          {m.cacheEstimate && m.cacheEstimate.state !== 'none' && (
+            <span className="ml-auto shrink-0">
+              <MessageCacheStats estimate={m.cacheEstimate} />
+            </span>
+          )}
+        </div>
+
+        {/* reasoning — a quiet, collapsible aside above the answer (collapsed by default) */}
+        {reasoning && <ThinkingBlock reasoning={reasoning} cacheState={cacheState} />}
+
+        {/* body — content flows directly, like a real message */}
+        {shouldRenderContent && (
+          hasRenderableContent(m.content)
+            ? <ContentRenderer content={m.content} role={role} cacheState={cacheState} />
+            : <span className="italic text-ink-4 text-[12.5px]">(empty)</span>
         )}
-        {m.tool_call_id && (
-          <span className="mono text-[10.5px] opacity-70">→ {m.tool_call_id}</span>
-        )}
-        <div className="ml-auto">
-          <MessageCacheStats estimate={m.cacheEstimate} />
-        </div>
-      </div>
 
-      {reasoning && (
-        <div className="mt-2 rounded-xl bg-zinc-50/90 border border-zinc-300/80 px-3 py-2 text-zinc-950">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-zinc-600/90 font-semibold mb-1">
-            reasoning
-          </div>
-          <TextBlock cacheState={cacheState}>{reasoning}</TextBlock>
-        </div>
-      )}
-
-      {renderContentAsBlock ? (
-        <div className="mt-2 rounded-xl bg-emerald-50/85 border border-emerald-200/80 px-3 py-2 text-emerald-950">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-emerald-700/80 font-semibold mb-1">
-            content
-          </div>
-          <ContentRenderer content={m.content} role={role} cacheState={cacheState} />
-        </div>
-      ) : shouldRenderContent ? (
-        <ContentRenderer content={m.content} role={role} cacheState={cacheState} />
-      ) : null}
-
-      {/* OpenAI: tool_calls on assistant messages */}
-      {hasToolCalls && (
-        <div className="mt-2 rounded-xl bg-red-50/85 border border-red-200/80 px-3 py-2 text-red-950">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-red-700/80 font-semibold mb-1.5">
-            tool_calls
-          </div>
-          <div className="flex flex-col gap-1.5">
+        {/* tool / function calls — shown inline, no extra framing */}
+        {(hasToolCalls || hasFunctionCall) && (
+          <div className="mt-2.5 flex flex-col gap-2">
             {toolCalls.map((tc, i) => (
               <ToolCallCard key={i} tc={tc} />
             ))}
+            {m.function_call && (
+              <ToolCallCard tc={{ function: m.function_call }} />
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </article>
+    </div>
+  );
+}
 
-      {/* OpenAI legacy: function_call */}
-      {m.function_call && (
-        <div className="mt-2">
-          <ToolCallCard tc={{ function: m.function_call }} />
+// ThinkingBlock renders `reasoning_content` the way modern chat UIs do: a
+// single quiet line ("思考过程") that expands on click. Reasoning tends to be
+// long, so it starts collapsed to keep the conversation scannable.
+function ThinkingBlock({ reasoning, cacheState }: { reasoning: string; cacheState: 'none' | 'cached' | 'partial' }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2.5 overflow-hidden rounded-lg border border-slate-200/70 bg-slate-50/55">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left transition hover:bg-slate-100/60"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="shrink-0 text-slate-400">
+          <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2Z" />
+        </svg>
+        <span className="text-[11.5px] font-semibold text-slate-500">{t('detail.chat.thinking')}</span>
+        <span className="ml-auto flex items-center gap-1 text-[10.5px] text-slate-400">
+          {open ? t('detail.text.collapse') : t('detail.chat.expand')}
+          <svg
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+            className={'transition-transform ' + (open ? 'rotate-180' : '')}
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-slate-200/70 px-3 py-2.5 text-slate-500">
+          <TextBlock cacheState={cacheState}>{reasoning}</TextBlock>
         </div>
       )}
     </div>
   );
+}
+
+function RoleIcon({ role }: { role: string }) {
+  const props = {
+    width: 17,
+    height: 17,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 2,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+  };
+  if (role === 'user') {
+    return (
+      <svg {...props}>
+        <path d="M20 21a8 8 0 0 0-16 0" />
+        <circle cx="12" cy="7" r="4" />
+      </svg>
+    );
+  }
+  if (role === 'system' || role === 'developer') {
+    return (
+      <svg {...props}>
+        <path d="M4 7h16" />
+        <path d="M4 17h16" />
+        <circle cx="9" cy="7" r="2" />
+        <circle cx="15" cy="17" r="2" />
+      </svg>
+    );
+  }
+  if (role === 'tool' || role === 'function') {
+    return (
+      <svg {...props}>
+        <path d="M14.7 6.3a3 3 0 0 1 4.2 4.2l-8.4 8.4a3 3 0 0 1-4.2-4.2Z" />
+        <path d="M8.5 15.5l-2-2" />
+        <path d="M15 9l-2-2" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...props}>
+      <rect x="5" y="4" width="14" height="16" rx="2" />
+      <path d="M9 9h6" />
+      <path d="M9 13h4" />
+      <path d="M8 17h8" />
+    </svg>
+  );
+}
+
+function titleCase(value: string): string {
+  if (!value) return 'Message';
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function shortId(value: string): string {
+  return value.length > 12 ? value.slice(0, 12) + '...' : value;
 }
 
 function hasRenderableContent(content: Message['content']): boolean {
@@ -1335,52 +1472,58 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
   const argsRaw = tc.function?.arguments ?? (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {}, null, 2));
   let argsObj: Record<string, unknown> | null = null;
   try { argsObj = JSON.parse(argsRaw); } catch { /* ignore */ }
+  const entries = argsObj && typeof argsObj === 'object' ? Object.entries(argsObj) : [];
 
   // If no structured args, show as-is
   if (!argsObj || typeof argsObj !== 'object') {
     return (
-      <div className="rounded-xl bg-white/60 border border-white/75 overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[color:var(--glass-line)] bg-white/35">
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded-md
-                           bg-gradient-to-br from-violet-400 to-indigo-400 text-white text-[10px] font-bold">
-            ƒ
-          </span>
-          <span className="font-semibold text-[12.5px] mono">{name}</span>
-          {tc.id && <span className="ml-auto mono text-[10.5px] text-ink-4 truncate max-w-[200px]">{tc.id}</span>}
+      <div className="overflow-hidden rounded-lg border border-violet-200/80 bg-violet-50/70">
+        <ToolCallHeader name={name} id={tc.id} />
+        <div className="px-3 pb-3 pt-2">
+          <div className="mb-1.5">
+            <span className="inline-flex h-5 items-center rounded-md border border-violet-200/80 bg-white/70 px-1.5 text-[10px] font-bold leading-none text-violet-700">
+              Raw Arguments
+            </span>
+          </div>
+          <pre className="codeblock !max-h-[280px] !rounded-lg !border-violet-900/10">{formatUnknown(argsRaw)}</pre>
         </div>
-        <pre className="codeblock !rounded-none !border-0 !max-h-[280px]">{formatUnknown(argsRaw)}</pre>
       </div>
     );
   }
 
   // Structured args - show as pretty key-value pairs
-  const entries = Object.entries(argsObj);
   const isMultiline = entries.length > 1 || entries.some(([, v]) => typeof v === 'object' && v !== null);
 
   return (
-    <div className="rounded-xl bg-white/60 border border-white/75 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[color:var(--glass-line)] bg-white/35">
-        <span className="inline-flex items-center justify-center w-5 h-5 rounded-md
-                         bg-gradient-to-br from-violet-400 to-indigo-400 text-white text-[10px] font-bold">
-          ƒ
-        </span>
-        <span className="font-semibold text-[12.5px] mono">{name}</span>
-        {tc.id && <span className="ml-auto mono text-[10.5px] text-ink-4 truncate max-w-[200px]">{tc.id}</span>}
+    <div className="overflow-hidden rounded-lg border border-violet-200/80 bg-violet-50/70">
+      <ToolCallHeader name={name} id={tc.id}>
         {entries.length > 0 && (
           <button
             type="button"
             onClick={() => setShowRaw((v) => !v)}
-            className="ml-2 px-2 py-0.5 rounded bg-slate-100/80 hover:bg-slate-200/80 text-[10px] mono text-ink-3 transition"
+            className="inline-flex h-5 items-center rounded-md border border-violet-200/80 bg-white/75 px-1.5 text-[10px] font-bold leading-none text-violet-700 transition hover:bg-white"
           >
             {showRaw ? '{ } pretty' : '{ } raw'}
           </button>
         )}
-      </div>
+      </ToolCallHeader>
 
       {showRaw ? (
-        <pre className="codeblock !rounded-none !border-0 !max-h-[280px]">{formatUnknown(argsRaw)}</pre>
+        <div className="px-3 pb-3 pt-2">
+          <div className="mb-1.5">
+            <span className="inline-flex h-5 items-center rounded-md border border-violet-200/80 bg-white/70 px-1.5 text-[10px] font-bold leading-none text-violet-700">
+              Raw Arguments
+            </span>
+          </div>
+          <pre className="codeblock !max-h-[280px] !rounded-lg !border-violet-900/10">{formatUnknown(argsRaw)}</pre>
+        </div>
       ) : (
-        <div className="p-3 space-y-1.5 max-h-[280px] overflow-auto">
+        <div className="max-h-[280px] space-y-1.5 overflow-auto px-3 pb-3 pt-2">
+          <div className="mb-1.5">
+            <span className="inline-flex h-5 items-center rounded-md border border-violet-200/80 bg-white/70 px-1.5 text-[10px] font-bold leading-none text-violet-700">
+              Arguments
+            </span>
+          </div>
           {entries.length === 0 && <span className="text-ink-4 text-xs italic">(no arguments)</span>}
           {entries.map(([key, value]) => (
             <div key={key} className={isMultiline ? 'flex flex-col gap-0.5' : 'flex items-center gap-2'}>
@@ -1390,6 +1533,27 @@ function ToolCallCard({ tc }: { tc: ToolCall }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function ToolCallHeader({ name, id, children }: { name: string; id?: string; children?: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2 border-b border-violet-200/70 bg-white/55 px-3 py-2 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-violet-500 text-[11px] font-bold text-white shadow-[0_1px_0_rgba(255,255,255,0.35)_inset]">
+          ƒ
+        </span>
+        <span className="min-w-0 flex-1 truncate font-semibold text-[12.5px] text-violet-950 mono">{name}</span>
+      </div>
+      <div className="flex min-w-0 flex-col items-start gap-1.5 sm:flex-row sm:items-center sm:justify-end">
+        {id && (
+          <span className="w-full max-w-full truncate rounded-md border border-violet-200/80 bg-violet-100/80 px-1.5 py-0.5 text-[10px] font-bold text-violet-700 mono sm:w-auto sm:max-w-[240px]">
+            {shortId(id)}
+          </span>
+        )}
+        {children}
+      </div>
     </div>
   );
 }
