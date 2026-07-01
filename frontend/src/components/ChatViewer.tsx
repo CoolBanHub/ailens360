@@ -1256,12 +1256,12 @@ function ContentRenderer({ content, role, cacheState }: { content: Message['cont
   // array of parts (multimodal / anthropic blocks)
   return (
     <div className="flex flex-col gap-1.5">
-      {content.map((part, i) => <ContentPartView key={i} part={part} cacheState={cacheState} />)}
+      {content.map((part, i) => <ContentPartView key={i} part={part} role={role} cacheState={cacheState} />)}
     </div>
   );
 }
 
-function ContentPartView({ part, cacheState }: { part: ContentPart; cacheState?: 'none' | 'cached' | 'partial' }) {
+function ContentPartView({ part, role, cacheState }: { part: ContentPart; role?: string; cacheState?: 'none' | 'cached' | 'partial' }) {
   const type = (part.type || '').toLowerCase();
 
   // Text part (OpenAI: type=text; Anthropic: type=text)
@@ -1273,11 +1273,11 @@ function ContentPartView({ part, cacheState }: { part: ContentPart; cacheState?:
           <div className="text-[10px] uppercase tracking-[0.14em] text-ink-4 font-semibold mb-1">
             text <span className="mono normal-case opacity-70">· cache_control {cacheControl}</span>
           </div>
-          <TextBlock cacheState={cacheState}>{part.text}</TextBlock>
+          <TextBlock role={role} cacheState={cacheState}>{part.text}</TextBlock>
         </div>
       );
     }
-    return <TextBlock cacheState={cacheState}>{part.text}</TextBlock>;
+    return <TextBlock role={role} cacheState={cacheState}>{part.text}</TextBlock>;
   }
 
   // OpenAI image_url part
@@ -1345,7 +1345,11 @@ const COLLAPSE_MIN_LINES = 8;
 const COLLAPSE_PREVIEW_CHARS = 600;
 const COLLAPSE_PREVIEW_LINES = 8;
 
-const MARKDOWN_ROLES = new Set(['user', 'assistant']);
+// Roles whose content reads as natural language and is commonly authored in
+// markdown (prompts, instructions, responses). Tool/function output is left as
+// preformatted text — it's machine data (often JSON) where markdown would
+// mangle characters like # or *.
+const MARKDOWN_ROLES = new Set(['user', 'assistant', 'system', 'developer']);
 
 function TextBlock({ children, role, cacheState }: { children: string; role?: string; cacheState?: 'none' | 'cached' | 'partial' }) {
   const t = useT();
