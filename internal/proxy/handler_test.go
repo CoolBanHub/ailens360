@@ -189,6 +189,39 @@ func TestServeAcceptsQueryProjectKeyAndStripsItFromUpstream(t *testing.T) {
 	}
 }
 
+func TestServeUsesMetadataSessionIDAsTraceFallback(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	sink := &captureSink{}
+	h := newTestHandlerWithSink("sk-test", sink)
+	body := `{"model":"glm-5.2","messages":[],"metadata":{"user_id":"{\"device_id\":\"dev_1\",\"account_uuid\":\"\",\"session_id\":\"sess_1\"}"}}`
+	req := httptest.NewRequest(http.MethodPost, "/"+upstream.URL+"/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("X-AILens-Project-Key", "sk-test")
+	rec := httptest.NewRecorder()
+
+	h.serve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if sink.ev == nil {
+		t.Fatal("no event submitted")
+	}
+	if sink.ev.SessionID != "sess_1" {
+		t.Fatalf("session_id = %q, want sess_1", sink.ev.SessionID)
+	}
+	if sink.ev.LogicTraceID != "sess_1" {
+		t.Fatalf("logic_trace_id = %q, want sess_1", sink.ev.LogicTraceID)
+	}
+	if sink.ev.UserID != "dev_1" {
+		t.Fatalf("user_id = %q, want dev_1", sink.ev.UserID)
+	}
+}
+
 func TestServeDoesNotMarkCompletedResponsesStreamAborted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

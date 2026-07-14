@@ -196,6 +196,26 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyMeta := extractTelemetryMetadata(reqBody)
+	if userID == "" {
+		userID = bodyMeta.UserID
+	}
+	if sessionID == "" {
+		sessionID = bodyMeta.SessionID
+	}
+	if tags == "" {
+		tags = bodyMeta.Tags
+	}
+	if logicTraceID == "" {
+		logicTraceID = bodyMeta.LogicTraceID
+	}
+	if traceName == "" {
+		traceName = bodyMeta.TraceName
+	}
+	if logicTraceID == "" && bodyMeta.SessionID != "" {
+		logicTraceID = bodyMeta.SessionID
+	}
+
 	model, isStream := peekModelAndStream(reqBody)
 
 	// Kick off the request body upload in parallel with the upstream call.
@@ -483,6 +503,150 @@ func peekModelAndStream(body []byte) (model string, stream bool) {
 		return "", false
 	}
 	return probe.Model, probe.Stream
+}
+
+type telemetryMetadata struct {
+	UserID       string
+	SessionID    string
+	Tags         string
+	LogicTraceID string
+	TraceName    string
+}
+
+func extractTelemetryMetadata(body []byte) telemetryMetadata {
+	if len(body) == 0 {
+		return telemetryMetadata{}
+	}
+	var probe struct {
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || len(probe.Metadata) == 0 {
+		return telemetryMetadata{}
+	}
+	obj := metadataObject(probe.Metadata)
+	if len(obj) == 0 {
+		return telemetryMetadata{}
+	}
+
+	out := telemetryMetadata{
+		SessionID:    firstMetadataString(obj, "session_id", "sessionId", "sessionID", "session"),
+		LogicTraceID: firstMetadataString(obj, "trace_id", "traceId", "traceID"),
+		TraceName:    firstMetadataString(obj, "trace_name", "traceName"),
+		Tags:         firstMetadataString(obj, "tags", "tag"),
+	}
+	out.UserID, out.SessionID = userAndSessionFromMetadata(obj, out.SessionID)
+	return out
+}
+
+func userAndSessionFromMetadata(obj map[string]json.RawMessage, sessionID string) (string, string) {
+	raw, ok := firstMetadataRaw(obj, "user_id", "userId", "userID", "user")
+	if !ok {
+		return "", sessionID
+	}
+
+	nested := metadataObject(raw)
+	if len(nested) == 0 {
+		return metadataString(raw), sessionID
+	}
+
+	if sessionID == "" {
+		sessionID = firstMetadataString(nested, "session_id", "sessionId", "sessionID", "session")
+	}
+	userID := firstMetadataString(nested,
+		"account_uuid", "accountUuid", "accountUUID",
+		"account_id", "accountId", "accountID",
+		"user_id", "userId", "userID",
+		"id",
+	)
+	if userID == "" {
+		userID = firstMetadataString(nested, "device_id", "deviceId", "deviceID")
+	}
+	return userID, sessionID
+}
+
+func metadataObject(raw json.RawMessage) map[string]json.RawMessage {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil
+		}
+		raw = bytes.TrimSpace([]byte(s))
+	}
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+func firstMetadataString(obj map[string]json.RawMessage, keys ...string) string {
+	for _, key := range keys {
+		for gotKey, raw := range obj {
+			if strings.EqualFold(gotKey, key) {
+				if v := metadataString(raw); v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func firstMetadataRaw(obj map[string]json.RawMessage, keys ...string) (json.RawMessage, bool) {
+	for _, key := range keys {
+		for gotKey, raw := range obj {
+			if strings.EqualFold(gotKey, key) {
+				raw = bytes.TrimSpace(raw)
+				if isNonEmptyMetadataRaw(raw) {
+					return raw, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func isNonEmptyMetadataRaw(raw json.RawMessage) bool {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return false
+	}
+	var s string
+	return json.Unmarshal(raw, &s) != nil || strings.TrimSpace(s) != ""
+}
+
+func metadataString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	var vals []string
+	if err := json.Unmarshal(raw, &vals); err == nil {
+		nonEmpty := vals[:0]
+		for _, v := range vals {
+			if v = strings.TrimSpace(v); v != "" {
+				nonEmpty = append(nonEmpty, v)
+			}
+		}
+		return strings.Join(nonEmpty, ",")
+	}
+	var n json.Number
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&n); err == nil {
+		return n.String()
+	}
+	return ""
 }
 
 func cloneHeader(h http.Header) map[string][]string {
