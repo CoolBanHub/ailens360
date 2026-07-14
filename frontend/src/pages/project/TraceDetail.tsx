@@ -296,6 +296,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
   const [isCopying, setIsCopying] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const latestSpan = p.spans[p.spans.length - 1];
 
   const statusLabel = (s: string) => {
     const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
@@ -434,22 +435,22 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
         </div>
       </section>
 
-      {/* trace input/output — derived from first request body and last response */}
-      {p.spans.length > 0 && (
+      {/* The latest request contains the accumulated conversation for session-based traces. */}
+      {latestSpan && (
         <>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.input')}</SectionTitle>
             <BodyViewer
-              traceId={p.spans[0].ID}
+              traceId={latestSpan.ID}
               part="request"
               mode="request"
-              model={p.spans[0].Model}
-              cachedInputTokens={p.spans[0].CachedInputTokens}
+              model={latestSpan.Model}
+              cachedInputTokens={latestSpan.CachedInputTokens}
             />
           </section>
           <section className="glass glass-edge p-5">
             <SectionTitle>{tt('detail.output')}</SectionTitle>
-            <BodyViewer traceId={p.spans[p.spans.length - 1].ID} part="response" mode="response" />
+            <BodyViewer traceId={latestSpan.ID} part="response" mode="response" />
           </section>
         </>
       )}
