@@ -31,11 +31,6 @@ export default function ProjectSetup() {
   const p = data?.items?.find((x) => x.id === projectId);
 
   const [copied, setCopied] = useState<string | null>(null);
-  const copy = (key: string, text: string) => {
-    copyToClipboard(text);
-    setCopied(key);
-    setTimeout(() => setCopied((v) => (v === key ? null : v)), 1400);
-  };
 
   const [confirmReset, setConfirmReset] = useState(false);
   const resetKey = useMutation({
@@ -53,6 +48,12 @@ export default function ProjectSetup() {
 
   const withProjectKeyPlaceholder = (value: string) =>
     p.project_key ? value.split(p.project_key).join(PROJECT_KEY_PLACEHOLDER) : value;
+
+  const copy = (key: string, text: string) => {
+    copyToClipboard(text.split(PROJECT_KEY_PLACEHOLDER).join(p.project_key));
+    setCopied(key);
+    setTimeout(() => setCopied((v) => (v === key ? null : v)), 1400);
+  };
 
   const exampleFor = (mode: AccessMode, key: ProviderKey) => {
     if (mode === 'path') {
@@ -150,6 +151,27 @@ export default function ProjectSetup() {
             <div key={mode} className="rounded-2xl border border-white/70 bg-white/35 p-3.5">
               <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-4">{title}</div>
               <div className="flex flex-col gap-2.5">
+                {mode === 'path' && (() => {
+                  const value = `${gatewayBase}/${PROJECT_KEY_PLACEHOLDER}`;
+                  const copyKey = 'path:generic';
+                  return (
+                    <div className="flex items-center gap-3">
+                      <span className="shrink-0 inline-flex items-center justify-center w-[96px]
+                                       rounded-full text-[11px] font-semibold text-white py-1
+                                       bg-gradient-to-r from-slate-500 to-slate-700
+                                       shadow-[0_2px_6px_-2px_rgba(15,23,42,0.2)]">
+                        {t('setup.step2.genericPath')}
+                      </span>
+                      <div className="flex-1 min-w-0 code-line truncate">{value}</div>
+                      <button
+                        onClick={() => copy(copyKey, value)}
+                        className="btn-ghost shrink-0 !text-[12px] !py-1.5 !px-3"
+                      >
+                        {copied === copyKey ? '✓' : t('common.copy')}
+                      </button>
+                    </div>
+                  );
+                })()}
                 {presets.map(({ label, key, grad }) => {
                   const value = exampleFor(mode as AccessMode, key);
                   const copyKey = `${mode}:${label}`;

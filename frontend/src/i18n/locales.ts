@@ -266,6 +266,7 @@ export const zh = {
   'setup.step2.modeHeader':  'Header 模式',
   'setup.step2.modePath':    '路径模式',
   'setup.step2.modeQuery':   'Query 模式',
+  'setup.step2.genericPath': '通用前缀',
 
   'setup.step3.title':       '在代码里替换 baseURL + 传入项目密钥',
   'setup.step3.hint':        '下面是几种常见 SDK 的接入示例 —— 真实 API Key 不变，base_url 换掉；默认示例使用 Header，不能加 Header 时可改用路径模式 URL。',
@@ -548,6 +549,7 @@ export const en: Record<keyof typeof zh, string> = {
   'setup.step2.modeHeader':  'Header mode',
   'setup.step2.modePath':    'Path mode',
   'setup.step2.modeQuery':   'Query mode',
+  'setup.step2.genericPath': 'Generic prefix',
 
   'setup.step3.title':       'Swap baseURL in code + pass the project key',
   'setup.step3.hint':        'A few common SDK examples below — your real API Key stays and base_url changes. Examples use headers by default; use the path URL when a client cannot add custom headers.',
