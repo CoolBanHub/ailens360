@@ -182,11 +182,6 @@ export default function TraceDetail() {
                 t0={t0}
                 totalDur={totalDur}
               />
-              {tree.syntheticCount > 0 && (
-                <div className="px-2 pt-1 text-[10px] text-amber-700/80">
-                  {tt('detail.agent.syntheticHint')}
-                </div>
-              )}
             </div>
           )}
         </aside>

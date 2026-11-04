@@ -271,8 +271,7 @@ function SpanTreeNode({ node, activeSpanId, onSelect, t0, totalDur }: {
           'w-full text-left rounded-xl border px-3 py-2 transition relative ' +
           (active
             ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
-            : 'bg-white/55 border-white/70 hover:bg-white/85') +
-          (node.synthetic ? ' border-dashed border-amber-300/80' : '')
+            : 'bg-white/55 border-white/70 hover:bg-white/85')
         }
       >
         {node.depth > 0 && (
@@ -323,11 +322,6 @@ function SpanTreeNode({ node, activeSpanId, onSelect, t0, totalDur }: {
                 </span>
               )}
             </>
-          )}
-          {node.synthetic && (
-            <span className="text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-200/70 rounded-full px-1.5 py-0.5">
-              {tt('detail.agent.synthetic')}
-            </span>
           )}
           <span className="ml-auto text-[11px] mono text-ink-4 tnum shrink-0">{fmtDur(dur)}</span>
         </div>
