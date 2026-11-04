@@ -5,7 +5,7 @@ import { api } from '../../lib/api';
 import type { ListResp, Trace } from '../../lib/types';
 import { fmtCost, fmtCostFine, fmtDur, fmtTs, copyToClipboard } from '../../lib/fmt';
 import BodyViewer from '../../components/BodyViewer';
-import { AgentSpanPanel, SpanTree, buildSpanTree, isLLMSpan, spanKind, summarizeAgents, type AgentSummary } from '../../components/SpanTree';
+import { AgentGroups, AgentSpanPanel, buildAgentGroups, isLLMSpan, spanKind, summarizeGroups, type AgentSummary } from '../../components/SpanTree';
 import { TokenCell } from '../../components/TokenCell';
 import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
@@ -70,10 +70,10 @@ export default function TraceDetail() {
     setSearch(next, { replace: true });
   };
 
-  // Build the real span tree. Stats are computed over LLM leaves only so the
-  // KPI tiles match billing; agent/tool spans contribute structure, not tokens.
-  const tree = useMemo(() => buildSpanTree(items), [items]);
-  const agents = useMemo(() => summarizeAgents(tree.roots), [tree]);
+  // Group spans by agent instead of rendering a deep tree. Stats are computed
+  // over LLM leaves only so the KPI tiles match billing.
+  const { groups, byId, hasAgentMeta } = useMemo(() => buildAgentGroups(items), [items]);
+  const agents = useMemo(() => summarizeGroups(groups), [groups]);
   const llmItems = useMemo(() => items.filter((s) => spanKind(s) === 'llm'), [items]);
   const t0 = items.length ? Math.min(...items.map((s) => new Date(s.CreatedAt).getTime())) : 0;
   const tn = items.length
@@ -88,7 +88,7 @@ export default function TraceDetail() {
   const totalCost       = llmItems.reduce((s, x) => s + (x.CostUSD || 0), 0);
   const agentCount      = new Set(items.map((s) => s.AgentPath || s.AgentName).filter(Boolean)).size;
   const traceName       = items.find((s) => s.TraceName)?.TraceName || '';
-  const activeNode      = tree.byId.get(activeSpanId);
+  const activeNode      = byId.get(activeSpanId);
   const worst = items.reduce(
     (acc, x) => x.Status === 'error' ? 'error'
                  : (x.Status === 'aborted' && acc !== 'error') ? 'aborted' : acc,
@@ -121,7 +121,7 @@ export default function TraceDetail() {
       </header>
 
       {/* split layout */}
-      <div className="grid grid-cols-1 xl:grid-cols-[400px_1fr] gap-4 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[440px_1fr] gap-4 items-start">
         {/* span tree */}
         <aside className="glass glass-edge p-3 xl:sticky xl:top-3 max-h-[calc(100vh-160px)] overflow-y-auto">
           <div className="px-2 pt-1 pb-2 flex items-center justify-between">
@@ -136,51 +136,36 @@ export default function TraceDetail() {
             <div className="text-xs text-ink-4 p-4">{tt('detail.spans.empty')}</div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {/* root row → trace summary view. Hidden for single-span traces
-                  since the lone span IS the trace and rendering both would
-                  duplicate identical info. */}
+              {/* a single compact entry back to the trace summary; no duplicate
+                  root card with the same stats as the right panel. */}
               {!isSingleSpan && (
                 <button
                   type="button"
                   onClick={selectRoot}
                   className={
-                    'text-left rounded-xl px-3 py-2 transition relative border ' +
+                    'w-full text-left rounded-xl px-3 py-2 transition border ' +
                     (isRootSelected
                       ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
-                      : 'bg-white/60 border-white/70 hover:bg-white/85')
+                      : 'bg-white/50 border-white/70 hover:bg-white/80')
                   }
                 >
                   <div className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500" />
-                    <div className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                      {traceName || <span className="mono text-ink-4 text-[11px]">{first?.TraceID?.slice(0, 8)}</span>}
-                    </div>
+                    <span className="font-semibold text-[12.5px] text-ink truncate flex-1">{tt('detail.overview')}</span>
                     <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
                   </div>
-                  <div className="mt-1 flex items-center justify-between gap-2">
-                    <div className="text-[10px] mono text-ink-4">
-                      root · {llmItems.length} calls · {agentCount} agents · {fmtCost(totalCost)}
-                    </div>
-                    <TokenCell
-                      size="sm"
-                      tokens={{
-                        input: totalIn,
-                        output: totalOut,
-                        cached: totalCached,
-                        cacheCreate: totalCacheWrite,
-                        reasoning: totalReasoning,
-                      }}
-                    />
+                  <div className="mt-0.5 text-[10px] mono text-ink-4">
+                    {llmItems.length} calls · {agentCount} agents · {fmtCost(totalCost)}
                   </div>
                 </button>
               )}
 
-              <SpanTree
-                roots={tree.roots}
+              <AgentGroups
+                groups={groups}
+                hasAgentMeta={hasAgentMeta}
                 activeSpanId={activeSpanId}
                 onSelect={selectSpan}
                 t0={t0}
-                totalDur={totalDur}
               />
             </div>
           )}
@@ -379,7 +364,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
               <span>{tt('detail.agents')}</span>
               <span className="tnum">{p.agentCount}</span>
             </div>
-            <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            <div className="mt-1.5 flex flex-col gap-1.5">
               {p.agents.map((a) => {
                 const role = a.role || 'system';
                 const tone = role === 'main'
@@ -388,15 +373,20 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
                     ? 'bg-violet-50 text-violet-700 border-violet-200/70'
                     : 'bg-slate-100 text-slate-600 border-slate-200/70';
                 return (
-                  <div key={a.key} className="rounded-xl border border-white/70 bg-white/55 px-3 py-2 flex items-center gap-2 min-w-0">
-                    <span className={`text-[9px] uppercase tracking-[0.12em] font-bold px-1.5 py-0.5 rounded-full border ${tone}`}>
+                  <div key={a.key} className="rounded-xl border border-white/70 bg-white/55 px-3 py-2 flex items-center gap-2.5 min-w-0">
+                    <span className={`shrink-0 whitespace-nowrap text-[9px] uppercase tracking-[0.10em] font-bold px-1.5 py-0.5 rounded-full border ${tone}`}>
                       {role === 'main' ? tt('detail.agent.main') : role === 'sub' ? tt('detail.agent.sub') : tt('detail.agent.system')}
                     </span>
-                    <span className="font-semibold text-[12px] text-ink truncate">{a.name}</span>
-                    <span className="mono text-[10px] text-ink-4 truncate">{a.path}</span>
-                    <span className="ml-auto text-[10px] mono text-ink-4 tnum shrink-0">
-                      {a.calls} calls · {fmtDur(Math.max(0, a.end - a.start))} · {fmtCostFine(a.cost)}
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-1.5 min-w-0">
+                        <span className="font-semibold text-[12px] text-ink truncate">{a.name}</span>
+                        <span className="mono text-[10px] text-ink-4 truncate" title={a.path}>{a.path}</span>
+                      </div>
+                      <div className="mt-0.5 text-[10px] mono text-ink-4 tnum">
+                        {a.calls} calls · {a.input + a.output} tok · {fmtCostFine(a.cost)}
+                      </div>
+                    </div>
+                    <span className="shrink-0 mono text-[10.5px] text-ink-3 tnum">{fmtDur(Math.max(0, a.end - a.start))}</span>
                   </div>
                 );
               })}

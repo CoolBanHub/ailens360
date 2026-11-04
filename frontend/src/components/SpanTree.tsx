@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { Trace } from '../lib/types';
-import { fmtCostFine, fmtDur, fmtTs } from '../lib/fmt';
-import { TokenCell } from './TokenCell';
+import { fmtCostFine, fmtDur, fmtTokens, fmtTs } from '../lib/fmt';
 import { CopyableId } from './CopyableId';
 import { useT } from '../i18n';
 
@@ -49,31 +48,15 @@ export interface AgentRollup {
   errors: number;
 }
 
-export function rollup(node: SpanNode): AgentRollup {
-  const out: AgentRollup = {
-    calls: 0, input: 0, output: 0, cached: 0, cacheCreate: 0,
-    reasoning: 0, cost: 0, start: Number.POSITIVE_INFINITY, end: 0, errors: 0,
-  };
-  const visit = (n: SpanNode) => {
-    const st = startMs(n);
-    const en = endMs(n);
-    if (st > 0) out.start = Math.min(out.start, st);
-    out.end = Math.max(out.end, en);
-    if (n.Status === 'error' || n.Status === 'aborted') out.errors++;
-    if (isLLMSpan(n)) {
-      out.calls++;
-      out.input += n.InputTokens || 0;
-      out.output += n.OutputTokens || 0;
-      out.cached += n.CachedInputTokens || 0;
-      out.cacheCreate += n.CacheCreationInputTokens || 0;
-      out.reasoning += n.ReasoningTokens || 0;
-      out.cost += n.CostUSD || 0;
-    }
-    n.children.forEach(visit);
-  };
-  visit(node);
-  if (!Number.isFinite(out.start)) out.start = 0;
-  return out;
+export interface AgentGroup extends AgentRollup {
+  key: string;
+  name: string;
+  role: string;
+  path: string;
+  agent: SpanNode;
+  spans: Trace[];
+  callSpans: Trace[];
+  toolSpans: Trace[];
 }
 
 export interface AgentSummary extends AgentRollup {
@@ -83,91 +66,82 @@ export interface AgentSummary extends AgentRollup {
   path: string;
 }
 
-/** Aggregate model calls by agent path. Agent/tool spans themselves are not
- *  counted; only LLM leaves contribute tokens/cost, so the totals match the
- *  trace-level KPI tiles exactly. */
-export function summarizeAgents(roots: SpanNode[]): AgentSummary[] {
-  const byKey = new Map<string, AgentSummary>();
-  const visit = (n: SpanNode) => {
-    const hasAgent = !!(n.AgentName || n.AgentPath);
-    // Agent spans create an entry even when they made no model calls, so the
-    // summary count matches the tree (and an empty sub-agent is still visible).
-    if (hasAgent && isAgentSpan(n)) {
-      const path = n.AgentPath || (n.AgentName ? '/' + n.AgentName : '/unknown');
-      if (!byKey.has(path)) {
-        byKey.set(path, {
-          key: path, path, name: n.AgentName || agentLabel(n), role: agentRoleOf(n),
-          calls: 0, input: 0, output: 0, cached: 0, cacheCreate: 0,
-          reasoning: 0, cost: 0, start: Number.POSITIVE_INFINITY, end: 0, errors: 0,
-        });
-      }
-    }
-    if (hasAgent && isLLMSpan(n)) {
-      const path = n.AgentPath || '/' + n.AgentName;
-      const key = path;
-      let a = byKey.get(key);
-      if (!a) {
-        a = {
-          key, path, name: n.AgentName || agentLabel(n), role: agentRoleOf(n),
-          calls: 0, input: 0, output: 0, cached: 0, cacheCreate: 0,
-          reasoning: 0, cost: 0, start: Number.POSITIVE_INFINITY, end: 0, errors: 0,
-        };
-        byKey.set(key, a);
-      }
-      a.calls++;
-      a.input += n.InputTokens || 0;
-      a.output += n.OutputTokens || 0;
-      a.cached += n.CachedInputTokens || 0;
-      a.cacheCreate += n.CacheCreationInputTokens || 0;
-      a.reasoning += n.ReasoningTokens || 0;
-      a.cost += n.CostUSD || 0;
-      const st = startMs(n);
-      if (st > 0) a.start = Math.min(a.start, st);
-      a.end = Math.max(a.end, endMs(n));
-      if (n.Status === 'error' || n.Status === 'aborted') a.errors++;
-    }
-    n.children.forEach(visit);
+function rollupSpans(spans: Trace[]): AgentRollup {
+  const out: AgentRollup = {
+    calls: 0, input: 0, output: 0, cached: 0, cacheCreate: 0,
+    reasoning: 0, cost: 0, start: Number.POSITIVE_INFINITY, end: 0, errors: 0,
   };
-  roots.forEach(visit);
-  return [...byKey.values()]
-    .map((a) => ({ ...a, start: Number.isFinite(a.start) ? a.start : 0 }))
-    .sort((a, b) => a.start - b.start);
+  for (const s of spans) {
+    const st = startMs(s);
+    const en = endMs(s);
+    if (st > 0) out.start = Math.min(out.start, st);
+    out.end = Math.max(out.end, en);
+    if (s.Status === 'error' || s.Status === 'aborted') out.errors++;
+    if (isLLMSpan(s)) {
+      out.calls++;
+      out.input += s.InputTokens || 0;
+      out.output += s.OutputTokens || 0;
+      out.cached += s.CachedInputTokens || 0;
+      out.cacheCreate += s.CacheCreationInputTokens || 0;
+      out.reasoning += s.ReasoningTokens || 0;
+      out.cost += s.CostUSD || 0;
+    }
+  }
+  if (!Number.isFinite(out.start)) out.start = 0;
+  return out;
 }
 
-/** Build a parent/child tree from the flat trace span list. Dangling parent
- *  ids (a child was recorded but its agent span was not, e.g. header-only
- *  clients) become synthetic agent nodes so the hierarchy is still visible. */
-export function buildSpanTree(items: Trace[]): { roots: SpanNode[]; byId: Map<string, SpanNode>; syntheticCount: number } {
+/**
+ * Build flat agent sections instead of a deep tree. Agents are grouped by
+ * agent_path, so a trace with router + worker + memory reads as three clear
+ * cards rather than an indented call tree. Nested agents still show their
+ * path; the UI does not need extra indentation to explain ownership.
+ */
+export function buildAgentGroups(items: Trace[]): {
+  groups: AgentGroup[];
+  byId: Map<string, SpanNode>;
+  hasAgentMeta: boolean;
+} {
   const byId = new Map<string, SpanNode>();
   for (const s of items) {
     byId.set(s.ID, { ...s, children: [], depth: 0, order: 0 });
   }
-  const roots: SpanNode[] = [];
-  const ghosts = new Map<string, SpanNode>();
-
   for (const s of items) {
     const node = byId.get(s.ID);
-    if (!node) continue;
-    const parentId = s.ParentSpanID || '';
-    if (!parentId) {
-      roots.push(node);
-      continue;
-    }
-    const parent = byId.get(parentId);
-    if (parent) {
-      parent.children.push(node);
-      continue;
-    }
-    let ghost = ghosts.get(parentId);
-    if (!ghost) {
-      ghost = {
-        ...s,
-        ID: parentId,
+    const parent = s.ParentSpanID ? byId.get(s.ParentSpanID) : undefined;
+    if (node && parent) parent.children.push(node);
+  }
+
+  const hasAgentMeta = items.some((s) => !!(s.AgentName || s.AgentPath));
+  const buckets = new Map<string, Trace[]>();
+  for (const s of items) {
+    const path = s.AgentPath || (s.AgentName ? '/' + s.AgentName : '');
+    const key = path || '__unknown__';
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(s);
+  }
+
+  const groups: AgentGroup[] = [];
+  for (const [key, spans] of buckets) {
+    spans.sort((a, b) => startMs(a) - startMs(b));
+    const first = spans[0];
+    const path = key === '__unknown__' ? '' : key;
+    const name = first.AgentName || (path ? path.split('/').filter(Boolean).pop() || 'agent' : '调用');
+    const role = hasAgentMeta ? agentRoleOf(first) : '';
+
+    const realAgent = spans.find(isAgentSpan);
+    let agent = realAgent ? byId.get(realAgent.ID) : undefined;
+    if (!agent) {
+      const synthetic: SpanNode = {
+        ...first,
+        ID: 'synthetic:' + (path || 'unknown'),
         ParentSpanID: '',
         SpanKind: 'agent',
-        SpanName: s.AgentName ? `${s.AgentName}.run` : 'agent',
+        SpanName: name ? `${name}.run` : 'agent',
         Model: '',
-        LatencyMs: 0,
+        AgentName: path ? name : '',
+        AgentRole: role,
+        AgentPath: path,
         InputTokens: 0,
         OutputTokens: 0,
         TotalTokens: 0,
@@ -179,24 +153,53 @@ export function buildSpanTree(items: Trace[]): { roots: SpanNode[]; byId: Map<st
         order: 0,
         synthetic: true,
       };
-      ghosts.set(parentId, ghost);
-      roots.push(ghost);
+      byId.set(synthetic.ID, synthetic);
+      agent = synthetic;
     }
-    ghost.children.push(node);
+
+    // AgentSpanPanel lists direct leaves; keep the real children plus every
+    // span that belongs to this agent path.
+    const childIds = new Set(agent.children.map((c) => c.ID));
+    for (const s of spans) {
+      const n = byId.get(s.ID);
+      if (n && n.ID !== agent.ID && !childIds.has(n.ID)) {
+        agent.children.push(n);
+        childIds.add(n.ID);
+      }
+    }
+
+    const callSpans = spans.filter(isLLMSpan).sort((a, b) => startMs(a) - startMs(b));
+    const toolSpans = spans.filter(isToolSpan).sort((a, b) => startMs(a) - startMs(b));
+    const roll = rollupSpans(spans);
+    groups.push({
+      key, name, role, path, agent, spans, callSpans, toolSpans, ...roll,
+    });
   }
 
-  let order = 0;
-  const sortRec = (nodes: SpanNode[], depth: number) => {
-    nodes.sort((a, b) => startMs(a) - startMs(b));
-    for (const n of nodes) {
-      n.depth = depth;
-      n.order = ++order;
-      sortRec(n.children, depth + 1);
-    }
-  };
-  sortRec(roots, 0);
+  const rank = (role: string) => role === 'main' ? 0 : role === 'sub' ? 1 : role === 'system' ? 2 : 3;
+  groups.sort((a, b) => rank(a.role) - rank(b.role) || a.start - b.start);
+  return { groups, byId, hasAgentMeta };
+}
 
-  return { roots, byId, syntheticCount: ghosts.size };
+export function summarizeGroups(groups: AgentGroup[]): AgentSummary[] {
+  return groups
+    .filter((g) => !!g.path)
+    .map((g) => ({
+      key: g.key,
+      name: g.name,
+      role: g.role,
+      path: g.path,
+      calls: g.calls,
+      input: g.input,
+      output: g.output,
+      cached: g.cached,
+      cacheCreate: g.cacheCreate,
+      reasoning: g.reasoning,
+      cost: g.cost,
+      start: g.start,
+      end: g.end,
+      errors: g.errors,
+    }));
 }
 
 const roleBadge = (role: string) => {
@@ -215,181 +218,256 @@ const roleLabelKey = (role: string) => {
 
 const statusDot = (s: string) => s === 'error' ? 'err' : s === 'aborted' ? 'warn' : 'ok';
 
-/* ── tree ─────────────────────────────────────────────────────── */
+const accentClass = (role: string) => {
+  if (role === 'main') return 'border-l-indigo-500';
+  if (role === 'sub') return 'border-l-violet-500';
+  if (role === 'tool') return 'border-l-cyan-500';
+  return 'border-l-slate-400';
+};
 
-interface SpanTreeProps {
-  roots: SpanNode[];
+/* ── grouped agent list ──────────────────────────────────────── */
+
+interface AgentGroupsProps {
+  groups: AgentGroup[];
+  hasAgentMeta: boolean;
   activeSpanId: string;
   onSelect: (id: string) => void;
   t0: number;
-  totalDur: number;
 }
 
-export function SpanTree({ roots, activeSpanId, onSelect, t0, totalDur }: SpanTreeProps) {
+export function AgentGroups({ groups, hasAgentMeta, activeSpanId, onSelect, t0 }: AgentGroupsProps) {
+  const tt = useT();
+  const legacy = useMemo(() => {
+    if (hasAgentMeta) return [];
+    return groups
+      .flatMap((g) => g.spans)
+      .filter((s) => isLLMSpan(s) || isToolSpan(s))
+      .sort((a, b) => startMs(a) - startMs(b));
+  }, [groups, hasAgentMeta]);
+
+  if (!hasAgentMeta) {
+    return (
+      <div className="rounded-xl border border-white/70 bg-white/45 overflow-hidden">
+        {legacy.length === 0 ? (
+          <div className="px-3 py-4 text-xs text-ink-4">{tt('detail.spans.empty')}</div>
+        ) : legacy.map((s, i) => (
+          isToolSpan(s)
+            ? <ToolRow key={s.ID} span={s} active={s.ID === activeSpanId} onSelect={onSelect} t0={t0} />
+            : <CallRow key={s.ID} span={s} index={i + 1} active={s.ID === activeSpanId} onSelect={onSelect} t0={t0} />
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-1.5">
-      {roots.map((n) => (
-        <SpanTreeNode
-          key={n.ID}
-          node={n}
+    <div className="flex flex-col gap-2.5">
+      {groups.map((g) => (
+        <AgentGroupCard
+          key={g.key}
+          group={g}
           activeSpanId={activeSpanId}
           onSelect={onSelect}
           t0={t0}
-          totalDur={totalDur}
         />
       ))}
     </div>
   );
 }
 
-function SpanTreeNode({ node, activeSpanId, onSelect, t0, totalDur }: {
-  node: SpanNode;
+function AgentGroupCard({ group, activeSpanId, onSelect, t0 }: {
+  group: AgentGroup;
   activeSpanId: string;
   onSelect: (id: string) => void;
   t0: number;
-  totalDur: number;
 }) {
   const tt = useT();
-  const [open, setOpen] = useState(node.depth < 2 || node.children.length <= 4);
-  const active = node.ID === activeSpanId;
-  const agent = isAgentSpan(node);
-  const tool = isToolSpan(node);
-  const r = rollup(node);
-  const start = startMs(node);
-  const ownDur = Math.max(0, endMs(node) - start);
-  const dur = agent ? Math.max(ownDur, r.end - r.start) : (ownDur || r.end - r.start);
-  const startPct = totalDur > 0 ? Math.max(0, Math.min(100, ((start - t0) / totalDur) * 100)) : 0;
-  const durPct = totalDur > 0 ? Math.max(1.5, Math.min(100 - startPct, (dur / totalDur) * 100)) : 100;
-  const role = agentRoleOf(node);
+  const [open, setOpen] = useState(true);
+  const isActive = group.agent.ID === activeSpanId;
+  const hasActiveChild = group.callSpans.some((c) => c.ID === activeSpanId) || group.toolSpans.some((c) => c.ID === activeSpanId);
+  const tokens = group.input + group.output;
+  const role = group.role || '';
+  const offset = Math.max(0, group.start - t0);
 
   return (
-    <div style={{ marginLeft: node.depth === 0 ? 0 : Math.min(36, node.depth * 12) }}>
+    <section
+      className={
+        'rounded-xl border border-white/70 border-l-4 bg-white/45 overflow-hidden transition ' +
+        accentClass(role) + ' ' +
+        (isActive ? 'bg-white shadow-[0_2px_10px_-2px_rgba(99,102,241,0.25)]' : '')
+      }
+    >
       <button
         type="button"
-        onClick={() => onSelect(node.ID)}
-        className={
-          'w-full text-left rounded-xl border px-3 py-2 transition relative ' +
-          (active
-            ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
-            : 'bg-white/55 border-white/70 hover:bg-white/85')
-        }
+        onClick={() => onSelect(group.agent.ID)}
+        className="w-full text-left px-3 py-2.5 hover:bg-white/60 transition"
       >
-        {node.depth > 0 && (
-          <div className="absolute left-[10px] top-0 bottom-0 w-px bg-[color:var(--glass-line)]" aria-hidden="true" />
-        )}
-        <div className="flex items-center gap-2 mb-1">
-          {node.children.length > 0 ? (
+        <div className="flex items-start gap-2">
+          <span className={`shrink-0 whitespace-nowrap text-[9px] uppercase tracking-[0.10em] font-bold px-1.5 py-0.5 rounded-full border ${roleBadge(role)}`}>
+            {role ? tt(roleLabelKey(role)) : tt('detail.agent.unknown')}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline gap-1.5 min-w-0">
+              <span className="font-bold text-[13.5px] text-ink truncate" title={group.name}>{group.name}</span>
+              {group.path && (
+                <span className="mono text-[10px] text-ink-4 truncate" title={group.path}>{group.path}</span>
+              )}
+            </div>
+            <div className="mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap text-[10px] mono text-ink-4 tnum">
+              <span>+{fmtDur(offset)}</span>
+              <span className="text-ink-5">·</span>
+              <span>{group.callSpans.length} calls</span>
+              <span className="text-ink-5">·</span>
+              <span>{fmtTokens(tokens)} tok</span>
+              <span className="text-ink-5">·</span>
+              <span>{fmtCostFine(group.cost)}</span>
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-1.5">
+            <span className="mono text-[11px] text-ink-3 tnum">{fmtDur(group.end - group.start)}</span>
             <span
               role="button"
               tabIndex={0}
               onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}
-              className="inline-flex h-4 w-4 items-center justify-center rounded text-ink-4 hover:text-ink-2"
+              className="inline-flex h-5 w-5 items-center justify-center rounded text-ink-4 hover:text-ink-2"
               title={open ? tt('detail.agent.collapse') : tt('detail.agent.expand')}
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                    className={open ? 'rotate-90 transition-transform' : 'transition-transform'}>
                 <path d="M9 6l6 6-6 6" />
               </svg>
             </span>
-          ) : (
-            <span className="w-4" />
-          )}
-          <span className="mono text-[10px] text-ink-4 w-5">#{node.order}</span>
-          <span className={`dot ${statusDot(node.Status)}`} />
-          {agent ? (
-            <>
-              <span className={`text-[9px] uppercase tracking-[0.12em] font-bold px-1.5 py-0.5 rounded-full border ${roleBadge(role)}`}>
-                {tt(roleLabelKey(role))}
-              </span>
-              <span className="font-semibold text-[12.5px] text-ink truncate">{agentLabel(node)}</span>
-              <span className="mono text-[10px] text-ink-4 truncate">{node.AgentPath || node.SpanName}</span>
-            </>
-          ) : tool ? (
-            <>
-              <span className="text-[9px] uppercase tracking-[0.12em] font-bold px-1.5 py-0.5 rounded-full border bg-cyan-50 text-cyan-700 border-cyan-200/70">
-                {tt('detail.agent.tool')}
-              </span>
-              <span className="font-semibold text-[12.5px] text-ink truncate">{node.SpanName || node.Model || 'tool'}</span>
-            </>
-          ) : (
-            <>
-              <span className="font-semibold text-[12.5px] text-ink truncate">{node.Model || 'llm'}</span>
-              {node.IsStream && (
-                <span className="text-[8.5px] uppercase tracking-[0.14em] text-indigo-600 font-semibold px-1.5 py-0.5 rounded-full bg-indigo-50/80 border border-indigo-200/60">
-                  stream
-                </span>
-              )}
-            </>
-          )}
-          <span className="ml-auto text-[11px] mono text-ink-4 tnum shrink-0">{fmtDur(dur)}</span>
-        </div>
-
-        {/* waterfall */}
-        <div className="relative h-1.5 rounded-full bg-slate-200/50 overflow-hidden">
-          <div
-            className={
-              'absolute top-0 h-full rounded-full ' +
-              (agent
-                ? 'bg-gradient-to-r from-indigo-500 to-violet-500'
-                : tool
-                  ? 'bg-gradient-to-r from-cyan-500 to-teal-400'
-                  : 'bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400')
-            }
-            style={{ left: startPct + '%', width: durPct + '%' }}
-          />
-        </div>
-
-        <div className="mt-1 flex justify-between items-center gap-2 text-[10px] mono text-ink-4">
-          <span>+{fmtDur(Math.max(0, start - t0))}</span>
-          <div className="flex items-center gap-2">
-            {agent ? (
-              <span className="tnum">{r.calls} calls · {r.input + r.output} tok</span>
-            ) : tool ? (
-              <span className="tnum">{node.Status || 'success'}</span>
-            ) : (
-              <TokenCell
-                size="sm"
-                tokens={{
-                  input: node.InputTokens,
-                  output: node.OutputTokens,
-                  cached: node.CachedInputTokens,
-                  cacheCreate: node.CacheCreationInputTokens,
-                  reasoning: node.ReasoningTokens,
-                  total: node.TotalTokens,
-                  estimated: node.TokensEstimated,
-                }}
-              />
-            )}
-            {!tool && <span>{fmtCostFine(agent ? r.cost : node.CostUSD)}</span>}
           </div>
         </div>
       </button>
 
-      {open && node.children.length > 0 && (
-        <div className="mt-1.5 flex flex-col gap-1.5">
-          {node.children.map((c) => (
-            <SpanTreeNode
-              key={c.ID}
-              node={c}
-              activeSpanId={activeSpanId}
-              onSelect={onSelect}
-              t0={t0}
-              totalDur={totalDur}
-            />
-          ))}
+      {open && (
+        <div className={'border-t border-[color:var(--glass-line)] ' + (hasActiveChild ? 'bg-white/40' : '')}>
+          {group.callSpans.length === 0 && group.toolSpans.length === 0 ? (
+            <div className="px-3 py-3 text-[11px] text-ink-4">{tt('detail.agent.noCalls')}</div>
+          ) : (
+            <>
+              {group.callSpans.map((s, i) => (
+                <CallRow
+                  key={s.ID}
+                  span={s}
+                  index={i + 1}
+                  active={s.ID === activeSpanId}
+                  onSelect={onSelect}
+                  t0={t0}
+                  showDivider={i > 0}
+                />
+              ))}
+              {group.toolSpans.map((s, i) => (
+                <ToolRow
+                  key={s.ID}
+                  span={s}
+                  active={s.ID === activeSpanId}
+                  onSelect={onSelect}
+                  t0={t0}
+                  showDivider={group.callSpans.length > 0 || i > 0}
+                />
+              ))}
+            </>
+          )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
-/* ── agent detail panel ───────────────────────────────────────── */
+function CallRow({ span, index, active, onSelect, t0, showDivider }: {
+  span: Trace;
+  index: number;
+  active: boolean;
+  onSelect: (id: string) => void;
+  t0: number;
+  showDivider?: boolean;
+}) {
+  const offset = Math.max(0, startMs(span) - t0);
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(span.ID)}
+      className={
+        'w-full text-left px-3 py-2 transition ' +
+        (showDivider ? 'border-t border-[color:var(--glass-line)] ' : '') +
+        (active ? 'bg-indigo-50/70' : 'hover:bg-white/60')
+      }
+    >
+      <div className="flex items-center gap-2">
+        <span className={`dot ${statusDot(span.Status)}`} />
+        <span className="mono text-[9.5px] text-ink-4 w-7 shrink-0">#{index}</span>
+        <span className="font-semibold text-[12.5px] text-ink truncate flex-1">
+          {span.Model || 'llm'}
+        </span>
+        {span.IsStream && (
+          <span className="shrink-0 text-[8px] uppercase tracking-[0.12em] text-indigo-600 font-semibold px-1.5 py-0.5 rounded-full bg-indigo-50/80 border border-indigo-200/60">
+            stream
+          </span>
+        )}
+        <span className="shrink-0 mono text-[11px] text-ink-3 tnum">{fmtDur(span.LatencyMs)}</span>
+      </div>
+      <div className="mt-0.5 pl-[18px] flex items-center gap-2 flex-wrap text-[10px] mono text-ink-4 tnum">
+        <span>+{fmtDur(offset)}</span>
+        <span className="text-ink-5">·</span>
+        <span>↓{fmtTokens(span.InputTokens)} ↑{fmtTokens(span.OutputTokens)}</span>
+        {span.CachedInputTokens > 0 && <span>cache {fmtTokens(span.CachedInputTokens)}</span>}
+        <span className="text-ink-5">·</span>
+        <span>{fmtCostFine(span.CostUSD)}</span>
+      </div>
+    </button>
+  );
+}
+
+function ToolRow({ span, active, onSelect, t0, showDivider }: {
+  span: Trace;
+  active: boolean;
+  onSelect: (id: string) => void;
+  t0: number;
+  showDivider?: boolean;
+}) {
+  const offset = Math.max(0, startMs(span) - t0);
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(span.ID)}
+      className={
+        'w-full text-left px-3 py-2 transition ' +
+        (showDivider ? 'border-t border-[color:var(--glass-line)] ' : '') +
+        (active ? 'bg-cyan-50/70' : 'hover:bg-white/60')
+      }
+    >
+      <div className="flex items-center gap-2">
+        <span className={`dot ${statusDot(span.Status)}`} />
+        <span className="text-[9px] uppercase tracking-[0.10em] font-bold px-1.5 py-0.5 rounded-full border bg-cyan-50 text-cyan-700 border-cyan-200/70">
+          tool
+        </span>
+        <span className="font-semibold text-[12px] text-ink truncate flex-1">{span.SpanName || 'tool'}</span>
+        <span className="mono text-[10.5px] text-ink-4 tnum">+{fmtDur(offset)}</span>
+        <span className="mono text-[11px] text-ink-3 tnum">{fmtDur(span.LatencyMs)}</span>
+      </div>
+    </button>
+  );
+}
+
+/* ── agent detail panel ──────────────────────────────────────── */
+
+function flattenLeaves(node: SpanNode, out: SpanNode[] = []): SpanNode[] {
+  for (const c of node.children) {
+    // Nested agents have their own section; keep the parent panel focused on
+    // this agent's own model/tool calls instead of duplicating sub-agent work.
+    if (isAgentSpan(c)) continue;
+    out.push(c);
+  }
+  return out;
+}
 
 export function AgentSpanPanel({ node, onSelect }: { node: SpanNode; onSelect: (id: string) => void }) {
   const tt = useT();
-  const r = rollup(node);
+  const leaves = useMemo(() => flattenLeaves(node), [node]);
+  const roll = useMemo(() => rollupSpans([node, ...leaves]), [node, leaves]);
   const tool = isToolSpan(node);
   const role = tool ? 'tool' : agentRoleOf(node);
   let attrs: Record<string, unknown> | null = null;
@@ -417,10 +495,10 @@ export function AgentSpanPanel({ node, onSelect }: { node: SpanNode; onSelect: (
           </span>
         </div>
         <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-          <Stat label={tool ? tt('detail.agent.toolCalls') : tt('detail.agent.calls')} value={tool ? '1' : String(r.calls)} />
-          <Stat label={tt('detail.agent.duration')} value={fmtDur(tool ? node.LatencyMs : r.end - r.start)} mono />
-          <Stat label={tt('detail.agent.tokens')} value={String(tool ? 0 : r.input + r.output)} mono />
-          <Stat label={tt('detail.tile.cost')} value={fmtCostFine(tool ? 0 : r.cost)} mono />
+          <Stat label={tool ? tt('detail.agent.toolCalls') : tt('detail.agent.calls')} value={tool ? '1' : String(roll.calls)} />
+          <Stat label={tt('detail.agent.duration')} value={fmtDur(roll.end - roll.start)} mono />
+          <Stat label={tt('detail.agent.tokens')} value={fmtTokens(roll.input + roll.output)} mono />
+          <Stat label={tt('detail.tile.cost')} value={fmtCostFine(roll.cost)} mono />
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-ink-3">
           <span className="text-ink-4">{fmtTs(node.CreatedAt)}</span>
@@ -429,7 +507,7 @@ export function AgentSpanPanel({ node, onSelect }: { node: SpanNode; onSelect: (
           {node.ParentSpanID && <><span className="text-ink-5">·</span><span>parent <CopyableId value={node.ParentSpanID} className="text-ink-2" /></span></>}
         </div>
         {node.synthetic && (
-          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800">
+          <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11.5px] text-slate-600">
             {tt('detail.agent.syntheticHint')}
           </div>
         )}
@@ -442,31 +520,38 @@ export function AgentSpanPanel({ node, onSelect }: { node: SpanNode; onSelect: (
 
       <section className="glass glass-edge p-5">
         <h3 className="text-[11px] uppercase tracking-[0.16em] text-ink-4 font-bold mb-3">
-          {tt('detail.agent.children')} · {node.children.length}
+          {tt('detail.agent.children')} · {leaves.length}
         </h3>
-        {node.children.length === 0 ? (
+        {leaves.length === 0 ? (
           <div className="text-xs text-ink-4">{tt('detail.agent.noChildren')}</div>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {node.children.map((c) => {
-              const cr = rollup(c);
-              return (
-                <button
-                  key={c.ID}
-                  type="button"
-                  onClick={() => onSelect(c.ID)}
-                  className="w-full text-left rounded-lg border border-white/70 bg-white/55 px-3 py-2 hover:bg-white/85 transition"
-                >
-                  <div className="flex items-center gap-2 text-[12px]">
-                    <span className={`dot ${statusDot(c.Status)}`} />
-                    <span className="text-[9px] uppercase tracking-[0.12em] font-bold text-ink-4">{spanKind(c)}</span>
-                    <span className="font-semibold text-ink truncate">{agentLabel(c)}</span>
-                    <span className="mono text-[10px] text-ink-4 truncate">{c.SpanName || c.Model}</span>
-                    <span className="ml-auto mono text-[10.5px] text-ink-4">{fmtDur(cr.end - cr.start)}</span>
-                  </div>
-                </button>
-              );
-            })}
+            {leaves.map((c) => (
+              <button
+                key={c.ID}
+                type="button"
+                onClick={() => onSelect(c.ID)}
+                className="w-full text-left rounded-lg border border-white/70 bg-white/55 px-3 py-2 hover:bg-white/85 transition"
+              >
+                <div className="flex items-center gap-2 text-[12px]">
+                  <span className={`dot ${statusDot(c.Status)}`} />
+                  <span className="text-[9px] uppercase tracking-[0.12em] font-bold text-ink-4">{spanKind(c)}</span>
+                  <span className="font-semibold text-ink truncate">{isLLMSpan(c) ? (c.Model || 'llm') : (c.SpanName || 'tool')}</span>
+                  <span className="ml-auto mono text-[10.5px] text-ink-4 tnum">{fmtDur(c.LatencyMs)}</span>
+                </div>
+                <div className="mt-0.5 pl-[18px] flex items-center gap-2 text-[10px] mono text-ink-4 tnum">
+                  <span>+{fmtDur(Math.max(0, startMs(c) - startMs(node)))}</span>
+                  {isLLMSpan(c) && (
+                    <>
+                      <span className="text-ink-5">·</span>
+                      <span>↓{fmtTokens(c.InputTokens)} ↑{fmtTokens(c.OutputTokens)}</span>
+                      <span className="text-ink-5">·</span>
+                      <span>{fmtCostFine(c.CostUSD)}</span>
+                    </>
+                  )}
+                </div>
+              </button>
+            ))}
           </div>
         )}
       </section>
