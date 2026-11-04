@@ -39,6 +39,17 @@ func Mount(r chi.Router, d RouterDeps) {
 		})
 	})
 
+	// Span ingest is called by application runtimes, so it authenticates with
+	// the project key (same as the proxy), not the admin JWT. Mount it before
+	// the /api group so the JWT middleware does not swallow it.
+	r.Route("/api/ingest", func(r chi.Router) {
+		r.Use(middleware.CORS(d.CORSOrigins))
+		r.Post("/spans", h.IngestSpans)
+		r.Options("/spans", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
 	r.Route("/api", func(r chi.Router) {
 		r.Use(middleware.CORS(d.CORSOrigins))
 		r.Use(middleware.AdminJWT(d.Auth))

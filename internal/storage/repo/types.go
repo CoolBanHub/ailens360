@@ -19,9 +19,32 @@ type Project struct {
 	UpdatedAt  time.Time
 }
 
+// Span kinds. A logical trace is a tree of spans: one agent/run span is the
+// root, LLM calls and tool calls are leaves, and sub-agents are interior
+// nodes. Historically every row was an LLM call (SpanKind defaults to "llm").
+const (
+	SpanKindLLM   = "llm"
+	SpanKindAgent = "agent"
+	SpanKindTool  = "tool"
+)
+
+// Agent roles. "main" is the orchestrating agent, "sub" is an agent spawned
+// by a tool/hand-off, "system" covers background helpers (summarizer, memory,
+// router/planner).
+const (
+	AgentRoleMain   = "main"
+	AgentRoleSub    = "sub"
+	AgentRoleSystem = "system"
+)
+
 // Trace is one proxied HTTP call's full record — semantically a SPAN of a
 // logical trace. Multiple Trace rows that share the same TraceID belong to
 // one logical run (e.g. all model calls inside a single agent.Generate).
+//
+// The parent/agent fields turn the flat trace_id grouping into a real tree:
+// ParentSpanID points at the agent or tool span that caused this call, and
+// Agent* identifies which agent owned it. They are optional: old rows and
+// clients that only send X-AILens-Trace-Id still work (empty parent => root).
 type Trace struct {
 	ID              string // span id (one HTTP round-trip)
 	TraceID         string // groups spans of the same logical run (X-AILens-Trace-Id)
@@ -64,6 +87,16 @@ type Trace struct {
 	FinishReason             string
 	StreamStatus             string
 	CreatedAt                time.Time
+
+	// Span-tree / agent identity. Empty values mean "legacy flat span".
+	ParentSpanID string // parent span id; empty = root of the logical trace
+	SpanKind     string // llm | agent | tool
+	SpanName     string // low-cardinality operation name, e.g. worker.llm
+	AgentID      string // stable agent type id, e.g. mtunion.worker
+	AgentName    string // display name, e.g. worker
+	AgentRole    string // main | sub | system
+	AgentPath    string // materialized path, e.g. /main/worker/researcher
+	Attributes   string // JSON object with span-specific fields
 }
 
 type ListTraceFilter struct {
@@ -73,6 +106,9 @@ type ListTraceFilter struct {
 	SessionID   string
 	Model       string
 	Status      string
+	SpanKind    string
+	AgentName   string
+	AgentRole   string
 	StartUnixMs int64
 	EndUnixMs   int64
 	Limit       int
@@ -111,7 +147,9 @@ type TraceGroup struct {
 	ProjectID                string
 	UserID                   string
 	SessionID                string
-	SpanCount                int
+	SpanCount                int    // LLM calls (backwards-compatible "calls" metric)
+	AgentCount               int    // distinct non-empty agent names in this trace
+	Agents                   string // comma-separated distinct agent names
 	InputTokens              int64
 	OutputTokens             int64
 	TotalTokens              int64
@@ -140,6 +178,11 @@ type ListTraceGroupFilter struct {
 type TraceRepo interface {
 	Create(ctx context.Context, t *Trace) error
 	BatchCreate(ctx context.Context, ts []*Trace) error
+	// Upsert inserts a span or updates it in place. Used by the span-ingest
+	// API: an agent/tool span is usually sent twice (start + end) with the
+	// same span_id and start_time, so idempotency is required. The partition
+	// key is created_at, hence the client must keep start_time stable.
+	Upsert(ctx context.Context, t *Trace) error
 	GetByID(ctx context.Context, id string) (*Trace, error)
 	List(ctx context.Context, f ListTraceFilter) ([]*Trace, int64, error)
 	ListGroups(ctx context.Context, f ListTraceGroupFilter) ([]*TraceGroup, int64, error)

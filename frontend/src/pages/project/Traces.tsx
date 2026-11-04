@@ -196,6 +196,7 @@ export default function ProjectTraces() {
                                border-b border-[color:var(--glass-line)]">
                   <th className="py-3.5 pl-6 pr-3 font-semibold">{t('traces.col.time')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.trace')}</th>
+                  <th className="py-3.5 px-3 font-semibold">{t('traces.col.agents')}</th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.user')} / {t('traces.col.session')}</th>
                   <th className="py-3.5 px-3 font-semibold text-right"><span className="inline-block -mr-[0.14em]">{t('traces.col.spans')}</span></th>
                   <th className="py-3.5 px-3 font-semibold">{t('traces.col.status')}</th>
@@ -231,6 +232,27 @@ export default function ProjectTraces() {
                       <td className="py-3.5 px-3 min-w-[240px]">
                         {g.TraceName && <div className="font-semibold text-ink leading-tight">{g.TraceName}</div>}
                         <CopyableId value={g.TraceID} className={!g.TraceName ? 'text-[12px] text-ink-2' : 'text-[11px] text-ink-4 mt-0.5'} />
+                      </td>
+                      <td className="py-3.5 px-3">
+                        {g.AgentCount > 0 ? (
+                          <div className="flex flex-wrap gap-1 max-w-[220px]">
+                            {(g.Agents || '').split(',').filter(Boolean).slice(0, 3).map((a) => (
+                              <span
+                                key={a}
+                                className="inline-flex items-center rounded-full border border-violet-200/70 bg-violet-50/80 px-2 py-0.5 text-[10px] font-semibold text-violet-700"
+                              >
+                                {a}
+                              </span>
+                            ))}
+                            {g.AgentCount > 3 && (
+                              <span className="inline-flex items-center rounded-full border border-white/80 bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-ink-4">
+                                +{g.AgentCount - 3}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="mono text-[11px] text-ink-4">—</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-3">
                         <div className="flex flex-col gap-0.5">

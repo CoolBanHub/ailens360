@@ -186,6 +186,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	tags := r.Header.Get("X-AILens-Tag")
 	logicTraceID := r.Header.Get("X-AILens-Trace-Id")
 	traceName := r.Header.Get("X-AILens-Trace-Name")
+	span := parseSpanMeta(r.Header, logicTraceID)
+	if logicTraceID == "" {
+		logicTraceID = span.TraceID
+	}
 
 	traceID := "tr_" + shortid.MustNew(16)
 
@@ -212,8 +216,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	if traceName == "" {
 		traceName = bodyMeta.TraceName
 	}
-	if logicTraceID == "" && bodyMeta.SessionID != "" {
-		logicTraceID = bodyMeta.SessionID
+	// Deliberately do NOT fall back to session_id as the trace id: a session
+	// spans many turns, and merging them makes every agent tree unreadable.
+	// With no explicit run id this request is its own logical trace.
+	if logicTraceID == "" {
+		logicTraceID = traceID
 	}
 
 	model, isStream := peekModelAndStream(reqBody)
@@ -246,7 +253,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("upstream request failed", "err", err, "host", upstreamURL.Host)
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		reqResult := reqUpload.wait()
-		h.emitError(traceID, reqResult, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, tl, err, 0, r.Header)
+		h.emitError(traceID, reqResult, model, isStream, proj.ID, userID, sessionID, tags, logicTraceID, traceName, span, tl, err, 0, r.Header)
 		return
 	}
 	defer resp.Body.Close()
@@ -343,6 +350,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		Tags:             tags,
 		LogicTraceID:     logicTraceID,
 		TraceName:        traceName,
+		ParentSpanID:     span.ParentSpanID,
+		SpanKind:         span.SpanKind,
+		SpanName:         span.SpanName,
+		AgentID:          span.AgentID,
+		AgentName:        span.AgentName,
+		AgentRole:        span.AgentRole,
+		AgentPath:        span.AgentPath,
 		RequestHeaders:   cloneHeader(r.Header),
 		RequestPath:      upstreamURL.String(),
 		ResponseHeaders:  cloneHeader(resp.Header),
@@ -467,7 +481,7 @@ func (s *swallowingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (h *Handler) emitError(traceID string, reqResult uploadResult, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, tl stream.Timeline, e error, status int, hdr http.Header) {
+func (h *Handler) emitError(traceID string, reqResult uploadResult, model string, isStream bool, projectID, userID, sessionID, tags, logicTraceID, traceName string, span spanMeta, tl stream.Timeline, e error, status int, hdr http.Header) {
 	tl.ResponseOut = time.Now()
 	ev := &stream.Event{
 		TraceID:         traceID,
@@ -483,6 +497,13 @@ func (h *Handler) emitError(traceID string, reqResult uploadResult, model string
 		Tags:            tags,
 		LogicTraceID:    logicTraceID,
 		TraceName:       traceName,
+		ParentSpanID:    span.ParentSpanID,
+		SpanKind:        span.SpanKind,
+		SpanName:        span.SpanName,
+		AgentID:         span.AgentID,
+		AgentName:       span.AgentName,
+		AgentRole:       span.AgentRole,
+		AgentPath:       span.AgentPath,
 		RequestHeaders:  cloneHeader(hdr),
 		RequestBodyKey:  reqResult.key,
 		RequestBodySize: reqResult.size,
@@ -503,6 +524,103 @@ func peekModelAndStream(body []byte) (model string, stream bool) {
 		return "", false
 	}
 	return probe.Model, probe.Stream
+}
+
+// spanMeta is the agent/span-tree context carried on an LLM request. The
+// proxy allocates the LLM span id itself, so clients only need to tell it
+// which agent span is the parent and who owns the call.
+type spanMeta struct {
+	TraceID      string // only set when parsed from W3C traceparent
+	ParentSpanID string
+	SpanKind     string
+	SpanName     string
+	AgentID      string
+	AgentName    string
+	AgentRole    string
+	AgentPath    string
+}
+
+func parseSpanMeta(h http.Header, logicTraceID string) spanMeta {
+	span := spanMeta{
+		ParentSpanID: clipHeader(h.Get("X-AILens-Parent-Span-Id")),
+		SpanKind:     normalizeSpanKind(h.Get("X-AILens-Span-Kind")),
+		SpanName:     clipHeader(h.Get("X-AILens-Span-Name")),
+		AgentID:      clipHeader(h.Get("X-AILens-Agent-Id")),
+		AgentName:    clipHeader(h.Get("X-AILens-Agent-Name")),
+		AgentRole:    normalizeAgentRole(h.Get("X-AILens-Agent-Role")),
+		AgentPath:    clipHeader(h.Get("X-AILens-Agent-Path")),
+	}
+	// W3C traceparent is optional. Its span-id is the caller's current span,
+	// which is exactly the parent of this HTTP call. The trace-id is only used
+	// when the caller did not send the native X-AILens-Trace-Id.
+	if tpTrace, tpSpan, ok := parseTraceparent(h.Get("traceparent")); ok {
+		if span.ParentSpanID == "" {
+			span.ParentSpanID = tpSpan
+		}
+		if logicTraceID == "" {
+			span.TraceID = tpTrace
+		}
+	}
+	if span.SpanKind == "" {
+		span.SpanKind = "llm"
+	}
+	if span.AgentPath == "" && span.AgentName != "" {
+		span.AgentPath = "/" + span.AgentName
+	}
+	return span
+}
+
+// parseTraceparent accepts the W3C version-00 form:
+// 00-<32 hex trace-id>-<16 hex span-id>-<2 hex flags>.
+func parseTraceparent(v string) (traceID, spanID string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(v), "-")
+	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 {
+		return "", "", false
+	}
+	for _, p := range parts[1:] {
+		if p == "" {
+			return "", "", false
+		}
+		for _, c := range p {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+				return "", "", false
+			}
+		}
+	}
+	return strings.ToLower(parts[1]), strings.ToLower(parts[2]), true
+}
+
+func normalizeSpanKind(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "llm", "agent", "tool":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return ""
+	}
+}
+
+func normalizeAgentRole(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "main", "sub", "system":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return ""
+	}
+}
+
+// clipHeader bounds user-supplied telemetry to a sane column size. Clip by
+// runes, not bytes, so a multi-byte agent name never produces invalid UTF-8
+// (Postgres text rejects it).
+func clipHeader(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) <= 256 {
+		return v
+	}
+	r := []rune(v)
+	if len(r) > 256 {
+		r = r[:256]
+	}
+	return string(r)
 }
 
 type telemetryMetadata struct {

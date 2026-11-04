@@ -25,6 +25,8 @@ export interface TraceGroup {
   UserID: string;
   SessionID: string;
   SpanCount: number;
+  AgentCount: number;
+  Agents: string;
   InputTokens: number;
   OutputTokens: number;
   TotalTokens: number;
@@ -78,6 +80,14 @@ export interface Trace {
   FinishReason: string;
   StreamStatus: string;
   CreatedAt: string;
+  ParentSpanID: string;
+  SpanKind: string;
+  SpanName: string;
+  AgentID: string;
+  AgentName: string;
+  AgentRole: string;
+  AgentPath: string;
+  Attributes: string;
 }
 
 export interface UsageItem {

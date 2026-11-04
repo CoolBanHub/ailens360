@@ -84,6 +84,15 @@ func (t *Transformer) Transform(ev *stream.Event) *repo.Trace {
 	if logicTraceID == "" {
 		logicTraceID = ev.TraceID
 	}
+	spanKind := ev.SpanKind
+	if spanKind == "" {
+		spanKind = repo.SpanKindLLM
+	}
+	spanName := ev.SpanName
+	if spanName == "" {
+		spanName = "llm"
+	}
+	attributes := "{}"
 
 	tr := &repo.Trace{
 		ID:                       ev.TraceID,
@@ -124,6 +133,14 @@ func (t *Transformer) Transform(ev *stream.Event) *repo.Trace {
 		FinishReason:             ev.FinishReason,
 		StreamStatus:             ev.StreamStatus,
 		CreatedAt:                tl.RequestIn,
+		ParentSpanID:             ev.ParentSpanID,
+		SpanKind:                 spanKind,
+		SpanName:                 spanName,
+		AgentID:                  ev.AgentID,
+		AgentName:                ev.AgentName,
+		AgentRole:                ev.AgentRole,
+		AgentPath:                ev.AgentPath,
+		Attributes:               attributes,
 	}
 	if tr.CreatedAt.IsZero() {
 		tr.CreatedAt = time.Now()

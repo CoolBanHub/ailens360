@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +23,8 @@ func NewTraceRepo(pool *pgxpool.Pool) *TraceRepo { return &TraceRepo{pool: pool}
 const traceCols = `id, trace_id, trace_name, project_id, user_id, session_id, tags, model, is_stream, status, status_code, error_message,
 		request_headers, request_path, response_headers, request_body_key, response_body_key, request_body_size, response_body_size, timeline,
 		input_tokens, output_tokens, total_tokens, reasoning_tokens, cached_input_tokens, cache_creation_input_tokens, tokens_estimated, cost_usd, latency_ms,
-		ttft_ms, ttfb_ms, gen_duration_ms, tps, chunk_count, bytes_streamed, finish_reason, stream_status, created_at`
+		ttft_ms, ttfb_ms, gen_duration_ms, tps, chunk_count, bytes_streamed, finish_reason, stream_status, created_at,
+		parent_span_id, span_kind, span_name, agent_id, agent_name, agent_role, agent_path, attributes`
 
 var traceCopyCols = []string{
 	"id", "trace_id", "trace_name", "project_id", "user_id", "session_id", "tags", "model", "is_stream",
@@ -32,15 +34,47 @@ var traceCopyCols = []string{
 	"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cached_input_tokens", "cache_creation_input_tokens",
 	"tokens_estimated", "cost_usd", "latency_ms",
 	"ttft_ms", "ttfb_ms", "gen_duration_ms", "tps", "chunk_count", "bytes_streamed", "finish_reason", "stream_status", "created_at",
+	"parent_span_id", "span_kind", "span_name", "agent_id", "agent_name", "agent_role", "agent_path", "attributes",
 }
 
 func (r *TraceRepo) Create(ctx context.Context, t *repo.Trace) error {
+	args := traceInsertArgs(t)
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO traces(`+traceCols+`) VALUES(`+placeholders(len(args))+`)`, args...)
+	return err
+}
+
+// Upsert inserts a span or updates the mutable fields in place. The span-ingest
+// API sends agent/tool spans twice (start and end); callers must keep the same
+// span_id + start_time so the partition key (id, created_at) matches.
+func (r *TraceRepo) Upsert(ctx context.Context, t *repo.Trace) error {
+	args := traceInsertArgs(t)
+	sets := make([]string, 0, len(traceCopyCols))
+	for _, col := range traceCopyCols {
+		if col == "id" || col == "created_at" {
+			continue
+		}
+		sets = append(sets, col+"=EXCLUDED."+col)
+	}
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO traces(`+traceCols+`) VALUES(`+placeholders(len(args))+`)
+		 ON CONFLICT (id, created_at) DO UPDATE SET `+strings.Join(sets, ", "), args...)
+	return err
+}
+
+// traceInsertArgs flattens a Trace in traceCopyCols order. Defaults keep
+// legacy callers and ingested spans valid even when optional fields are empty.
+func traceInsertArgs(t *repo.Trace) []any {
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now()
 	}
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO traces(`+traceCols+`)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, $13,$14,$15,$16,$17,$18,$19,$20, $21,$22,$23,$24,$25,$26,$27,$28,$29, $30,$31,$32,$33,$34,$35,$36,$37, $38)`,
+	if t.SpanKind == "" {
+		t.SpanKind = repo.SpanKindLLM
+	}
+	if t.Attributes == "" {
+		t.Attributes = "{}"
+	}
+	return []any{
 		t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Model, t.IsStream,
 		t.Status, t.StatusCode, t.ErrorMessage,
 		t.RequestHeaders, t.RequestPath, t.ResponseHeaders,
@@ -50,8 +84,21 @@ func (r *TraceRepo) Create(ctx context.Context, t *repo.Trace) error {
 		nullableInt64(t.TTFTMs), nullableInt64(t.TTFBMs), nullableInt64(t.GenDurationMs),
 		t.TPS, t.ChunkCount, t.BytesStreamed, t.FinishReason, t.StreamStatus,
 		t.CreatedAt.UnixMilli(),
-	)
-	return err
+		t.ParentSpanID, t.SpanKind, t.SpanName, t.AgentID, t.AgentName, t.AgentRole, t.AgentPath, t.Attributes,
+	}
+}
+
+// placeholders returns "$1,$2,...,$n".
+func placeholders(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('$')
+		b.WriteString(strconv.Itoa(i))
+	}
+	return b.String()
 }
 
 // BatchCreate uses COPY for high throughput on hot ingest paths.
@@ -61,20 +108,7 @@ func (r *TraceRepo) BatchCreate(ctx context.Context, ts []*repo.Trace) error {
 	}
 	rows := make([][]any, 0, len(ts))
 	for _, t := range ts {
-		if t.CreatedAt.IsZero() {
-			t.CreatedAt = time.Now()
-		}
-		rows = append(rows, []any{
-			t.ID, t.TraceID, t.TraceName, t.ProjectID, t.UserID, t.SessionID, t.Tags, t.Model, t.IsStream,
-			t.Status, t.StatusCode, t.ErrorMessage,
-			t.RequestHeaders, t.RequestPath, t.ResponseHeaders,
-			t.RequestBodyKey, t.ResponseBodyKey, t.RequestBodySize, t.ResponseBodySize, t.Timeline,
-			t.InputTokens, t.OutputTokens, t.TotalTokens, t.ReasoningTokens, t.CachedInputTokens, t.CacheCreationInputTokens,
-			t.TokensEstimated, t.CostUSD, t.LatencyMs,
-			nullableInt64(t.TTFTMs), nullableInt64(t.TTFBMs), nullableInt64(t.GenDurationMs),
-			t.TPS, t.ChunkCount, t.BytesStreamed, t.FinishReason, t.StreamStatus,
-			t.CreatedAt.UnixMilli(),
-		})
+		rows = append(rows, traceInsertArgs(t))
 	}
 	_, err := r.pool.CopyFrom(ctx, pgx.Identifier{"traces"}, traceCopyCols, pgx.CopyFromRows(rows))
 	return err
@@ -139,6 +173,18 @@ func (r *TraceRepo) List(ctx context.Context, f repo.ListTraceFilter) ([]*repo.T
 	if f.Status != "" {
 		where = append(where, "status=?")
 		args = append(args, f.Status)
+	}
+	if f.SpanKind != "" {
+		where = append(where, "span_kind=?")
+		args = append(args, f.SpanKind)
+	}
+	if f.AgentName != "" {
+		where = append(where, "agent_name=?")
+		args = append(args, f.AgentName)
+	}
+	if f.AgentRole != "" {
+		where = append(where, "agent_role=?")
+		args = append(args, f.AgentRole)
 	}
 	if f.StartUnixMs > 0 {
 		where = append(where, "created_at>=?")
@@ -258,15 +304,17 @@ func (r *TraceRepo) ListGroups(ctx context.Context, f repo.ListTraceGroupFilter)
 		MAX(project_id),
 		MAX(user_id),
 		MAX(session_id),
-		COUNT(1) AS span_count,
-		COALESCE(SUM(input_tokens),0),
-		COALESCE(SUM(output_tokens),0),
-		COALESCE(SUM(total_tokens),0),
-		COALESCE(SUM(reasoning_tokens),0),
-		COALESCE(SUM(cached_input_tokens),0),
-		COALESCE(SUM(cache_creation_input_tokens),0),
-		COALESCE(SUM(cost_usd),0),
-		(MAX(created_at) - MIN(created_at)) + COALESCE(MAX(latency_ms),0) AS latency_ms,
+		COUNT(*) FILTER (WHERE span_kind='llm') AS span_count,
+		COALESCE(SUM(input_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(output_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(total_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(reasoning_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(cached_input_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(cache_creation_input_tokens) FILTER (WHERE span_kind='llm'),0),
+		COALESCE(SUM(cost_usd) FILTER (WHERE span_kind='llm'),0),
+		COUNT(DISTINCT agent_name) FILTER (WHERE agent_name <> '') AS agent_count,
+		COALESCE(string_agg(DISTINCT NULLIF(agent_name,''), ','), '') AS agents,
+		MAX(created_at + latency_ms) - MIN(created_at) AS latency_ms,
 		` + statusCase + ` AS status,
 		MIN(created_at) AS started_at
 		FROM traces` + clause + `
@@ -287,7 +335,8 @@ func (r *TraceRepo) ListGroups(ctx context.Context, f repo.ListTraceGroupFilter)
 		if err := rows.Scan(&g.TraceID, &g.TraceName, &g.ProjectID, &g.UserID, &g.SessionID,
 			&g.SpanCount, &g.InputTokens, &g.OutputTokens, &g.TotalTokens,
 			&g.ReasoningTokens, &g.CachedInputTokens, &g.CacheCreationInputTokens,
-			&g.CostUSD, &g.LatencyMs, &g.Status, &startedMs); err != nil {
+			&g.CostUSD, &g.AgentCount, &g.Agents,
+			&g.LatencyMs, &g.Status, &startedMs); err != nil {
 			return nil, 0, err
 		}
 		g.StartedAt = time.UnixMilli(startedMs)
@@ -303,6 +352,10 @@ func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, e
 		keyCol = "model"
 	case "project":
 		keyCol = "project_id"
+	case "agent":
+		keyCol = "COALESCE(NULLIF(agent_name,''),'unknown')"
+	case "agent_path":
+		keyCol = "COALESCE(NULLIF(agent_path,''),'/unknown')"
 	case "day":
 		keyCol = "(created_at / 86400000)"
 	case "hour":
@@ -340,7 +393,7 @@ func (r *TraceRepo) UsageByDimension(ctx context.Context, dim string, startMs, e
 		COALESCE(SUM(cost_usd),0),
 		COALESCE(AVG(latency_ms),0),
 		COALESCE(AVG(CASE WHEN status='error' THEN 1.0 ELSE 0.0 END),0)
-		FROM traces%s GROUP BY k ORDER BY k`, keyCol, clause)
+		FROM llm_spans%s GROUP BY k ORDER BY k`, keyCol, clause)
 	rows, err := r.pool.Query(ctx, toPg(q), args...)
 	if err != nil {
 		return nil, err
@@ -371,7 +424,7 @@ func (r *TraceRepo) DeleteByProject(ctx context.Context, projectID string) (int6
 }
 
 func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []string, hasAny bool, err error) {
-	models, err = distinctNonEmpty(ctx, r.pool, "model", projectID)
+	models, err = distinctNonEmptyLLM(ctx, r.pool, "model", projectID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -384,11 +437,11 @@ func (r *TraceRepo) Facets(ctx context.Context, projectID string) (models []stri
 	return models, hasAny, nil
 }
 
-// distinctNonEmpty returns the distinct non-empty values of `col` for a given
-// project, ordered by frequency desc then alpha. The column name is whitelisted
-// by the caller — never pass user input here.
-func distinctNonEmpty(ctx context.Context, pool *pgxpool.Pool, col, projectID string) ([]string, error) {
-	q := fmt.Sprintf(`SELECT %s FROM traces
+// distinctNonEmptyLLM returns the distinct non-empty values of `col` for a
+// given project across model-call spans only, ordered by frequency desc then
+// alpha. The column name is whitelisted by the caller — never pass user input.
+func distinctNonEmptyLLM(ctx context.Context, pool *pgxpool.Pool, col, projectID string) ([]string, error) {
+	q := fmt.Sprintf(`SELECT %s FROM llm_spans
 		WHERE project_id = $1 AND %s <> ''
 		GROUP BY %s
 		ORDER BY COUNT(*) DESC, %s ASC
@@ -420,7 +473,8 @@ func scanTrace(s rowScanner) (*repo.Trace, error) {
 		&t.InputTokens, &t.OutputTokens, &t.TotalTokens, &t.ReasoningTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,
 		&t.TokensEstimated, &t.CostUSD, &t.LatencyMs,
 		&ttft, &ttfb, &gen, &t.TPS, &t.ChunkCount, &t.BytesStreamed, &t.FinishReason, &t.StreamStatus,
-		&createdMs); err != nil {
+		&createdMs,
+		&t.ParentSpanID, &t.SpanKind, &t.SpanName, &t.AgentID, &t.AgentName, &t.AgentRole, &t.AgentPath, &t.Attributes); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, repo.ErrNotFound
 		}

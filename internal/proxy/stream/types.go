@@ -84,6 +84,16 @@ type Event struct {
 	Tags         string // from X-AILens-Tag (comma-separated)
 	LogicTraceID string // from X-AILens-Trace-Id (groups spans of the same logical run)
 	TraceName    string // from X-AILens-Trace-Name (human label for the logical trace)
+
+	// Span-tree / agent identity. Empty values mean "legacy flat span"; the
+	// collector defaults SpanKind to "llm" so old clients keep working.
+	ParentSpanID string // from X-AILens-Parent-Span-Id or W3C traceparent
+	SpanKind     string // llm | agent | tool
+	SpanName     string // low-cardinality operation name
+	AgentID      string // from X-AILens-Agent-Id
+	AgentName    string // from X-AILens-Agent-Name
+	AgentRole    string // main | sub | system
+	AgentPath    string // from X-AILens-Agent-Path
 }
 
 func (t *Timeline) AppendChunk(ts time.Time) {

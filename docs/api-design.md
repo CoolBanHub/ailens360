@@ -134,7 +134,14 @@ AILens360 对外**不暴露** provider 概念——trace 不带厂商标签、�
 | `X-AILens-User` | 终端用户 ID |
 | `X-AILens-Session` | 会话 ID（用于聚合一段对话） |
 | `X-AILens-Tag` | 自定义标签（逗号分隔） |
-| `X-AILens-Trace-Id` / `X-AILens-Trace-Name` | 逻辑 trace 归组 |
+| `X-AILens-Trace-Id` / `X-AILens-Trace-Name` | 逻辑 trace 归组；建议用一次 run/task 的稳定 ID |
+| `X-AILens-Parent-Span-Id` | 父 span；把本次模型调用挂到对应 Agent / turn 下 |
+| `X-AILens-Span-Kind` / `X-AILens-Span-Name` | span 类型（默认 `llm`）与操作名，如 `worker.llm` |
+| `X-AILens-Agent-Id` / `X-AILens-Agent-Name` | Agent 稳定类型与展示名 |
+| `X-AILens-Agent-Role` | `main` / `sub` / `system` |
+| `X-AILens-Agent-Path` | 物化层级路径，如 `/main/worker/researcher` |
+
+也接受 W3C `traceparent`（version 00）：其 span-id 会作为 `parent_span_id`，trace-id 仅在未提供 `X-AILens-Trace-Id` 时使用。
 
 这些 Header **不会**被透传到上游 LLM，只用于 AILens360 内部记录。
 
@@ -216,6 +223,8 @@ Query 参数：
 - `session_id`：会话过滤
 - `model`：模型过滤
 - `status`：success / error
+- `span_kind`：llm / agent / tool
+- `agent_name` / `agent_role`：按 Agent 过滤
 - `start_time` / `end_time`：时间范围（unix ms）
 - `limit` / `offset`：分页（默认 50）
 
@@ -264,6 +273,14 @@ Query 参数：
         "BytesStreamed": 18342,
         "FinishReason": "stop",
         "StreamStatus": "completed",
+        "ParentSpanID": "sp_worker_1",
+        "SpanKind": "llm",
+        "SpanName": "worker.llm",
+        "AgentID": "mtunion.worker",
+        "AgentName": "worker",
+        "AgentRole": "main",
+        "AgentPath": "/main/worker",
+        "Attributes": "{}",
         "CreatedAt": "2026-05-15T10:00:00Z"
       }
     ]
@@ -271,7 +288,7 @@ Query 参数：
 }
 ```
 
-后端当前直接序列化 `repo.Trace`，所以字段名保持 Go 结构体的 PascalCase。支持的 Query 过滤为：`project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / `start_time` / `end_time` / `limit` / `offset`。`limit <= 0` 时默认取 50 条，生产用法建议显式指定 `limit + offset` 翻页。
+后端当前直接序列化 `repo.Trace`，所以字段名保持 Go 结构体的 PascalCase。支持的 Query 过滤为：`project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / `span_kind` / `agent_name` / `agent_role` / `start_time` / `end_time` / `limit` / `offset`。`limit <= 0` 时默认取 50 条，生产用法建议显式指定 `limit + offset` 翻页。
 
 字段速查：
 
@@ -287,6 +304,44 @@ Query 参数：
 | `RequestPath` | 本次请求转发到上游的**绝对 URL**（含 scheme + host + path + query） |
 
 > 非流式请求的 `TTFTMs` 为 `null`，避免把完整响应耗时误统计为首 token 延迟。
+
+#### 上报 Agent / Tool Span
+
+```
+POST /api/ingest/spans
+X-AILens-Project-Key: sk-...
+Content-Type: application/json
+
+{
+  "trace_name": "feishu.turn",
+  "spans": [
+    {
+      "trace_id": "task_123",
+      "span_id": "sp_worker_1",
+      "parent_span_id": "sp_root",
+      "kind": "agent",
+      "name": "worker.run",
+      "agent_id": "mtunion.worker",
+      "agent_name": "worker",
+      "agent_role": "main",
+      "agent_path": "/main/worker",
+      "start_time": 1731628800000,
+      "end_time": 1731628801500,
+      "status": "success",
+      "attributes": {"task_id": "task_123"}
+    }
+  ]
+}
+```
+
+代理只记录 LLM HTTP 调用；Agent 的创建/结束、工具调用等没有上游 HTTP 的节点通过此端点补齐。约定：
+
+- `span_id` 必填；`trace_id` 省略时等于 `span_id`。
+- `start_time` / `end_time` 为 Unix 毫秒；`end_time` 省略或为 0 表示仍在运行。
+- 幂等键是 `(span_id, start_time)`：同一个 span 先报 start、再报 end 时会更新同一行；两次上报必须使用相同的 `start_time`，并建议重发完整元数据（end 上报会覆盖同一行的字段）。
+- `kind` 默认按 `agent_name` 推断为 `agent`，否则为 `tool`；也接受 `llm`。
+- `attributes` 必须是 JSON，最大 64 KiB；单次最多 1000 个 span，body 最大 4 MiB。
+- 鉴权用项目密钥（与代理一致），不是控制台 JWT。
 
 #### 单个 Trace 详情
 
@@ -354,7 +409,7 @@ GET /api/traces/:id/body?part=request|response
 GET /api/trace_groups
 ```
 
-每行对应一个 `trace_id`，把同一次 Agent 运行的多次模型调用聚合成一行：`span_count` / `input_tokens` / `output_tokens` / `total_tokens` / `cost_usd` 求和；`latency_ms` = 组内 `max(created_at) − min(created_at)`；`status` 取组内最坏态（`error > aborted > success`）。
+每行对应一个 `trace_id`，把同一次 Agent 运行的多次模型调用聚合成一行：`span_count` 只计 LLM 调用，`input_tokens` / `output_tokens` / `total_tokens` / `cost_usd` 只对 LLM span 求和；`agent_count` / `agents` 给出组内 Agent 数；`latency_ms` = 组内 `max(created_at + latency_ms) − min(created_at)`；`status` 取组内最坏态（`error > aborted > success`）。
 
 支持过滤：`project_id` / `user_id` / `session_id` / `trace_name`（精确匹配）/ `model`（命中任一 span 即匹配）/ `status` / `start_time` / `end_time` / `limit` / `offset`。
 
@@ -377,7 +432,7 @@ GET /api/metrics/usage
 ```
 
 参数：
-- `dimension`：聚合维度（`model` / `project` / `day` / `hour`）
+- `dimension`：聚合维度（`model` / `project` / `agent` / `agent_path` / `day` / `hour`）
 - `start_time` / `end_time`
 - `project_id`（可选过滤）
 

@@ -50,3 +50,48 @@ func TestTransformerCarriesBodyKeysAndEstimatesOutputTokens(t *testing.T) {
 		t.Errorf("latency_ms = %d", tr.LatencyMs)
 	}
 }
+
+func TestTransformerCarriesSpanTreeFields(t *testing.T) {
+	tx := NewTransformer(slog.Default(), pricing.NewCatalog(), tokenizer.New())
+	ev := &stream.Event{
+		TraceID:      "tr_span",
+		LogicTraceID: "task_123",
+		Model:        "gpt-4o-mini",
+		ProjectID:    "prj_1",
+		Status:       "success",
+		ParentSpanID: "sp_worker_1",
+		SpanKind:     "llm",
+		SpanName:     "worker.llm",
+		AgentID:      "mtunion.worker",
+		AgentName:    "worker",
+		AgentRole:    "main",
+		AgentPath:    "/main/worker",
+		Timeline:     stream.Timeline{RequestIn: time.Now(), ResponseOut: time.Now().Add(time.Millisecond)},
+	}
+
+	tr := tx.Transform(ev)
+	if tr.ParentSpanID != "sp_worker_1" || tr.SpanKind != "llm" || tr.SpanName != "worker.llm" {
+		t.Fatalf("span fields = %q/%q/%q", tr.ParentSpanID, tr.SpanKind, tr.SpanName)
+	}
+	if tr.AgentName != "worker" || tr.AgentRole != "main" || tr.AgentPath != "/main/worker" {
+		t.Fatalf("agent fields = %+v", tr)
+	}
+}
+
+func TestTransformerDefaultsToLegacyLLMSpan(t *testing.T) {
+	tx := NewTransformer(slog.Default(), pricing.NewCatalog(), tokenizer.New())
+	ev := &stream.Event{
+		TraceID:   "tr_legacy",
+		Model:     "gpt-4o-mini",
+		ProjectID: "prj_1",
+		Status:    "success",
+		Timeline:  stream.Timeline{RequestIn: time.Now(), ResponseOut: time.Now()},
+	}
+	tr := tx.Transform(ev)
+	if tr.SpanKind != "llm" || tr.SpanName != "llm" {
+		t.Fatalf("legacy defaults = %q/%q", tr.SpanKind, tr.SpanName)
+	}
+	if tr.TraceID != "tr_legacy" {
+		t.Fatalf("logic trace = %q", tr.TraceID)
+	}
+}

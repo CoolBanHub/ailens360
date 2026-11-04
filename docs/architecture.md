@@ -268,13 +268,14 @@ Redis Stream "ailens360:traces"
 - `POST /api/auth/login` —— 用户名/密码换取 JWT
 - `GET  /api/auth/me` —— 当前登录态
 - `POST/GET/PUT/DELETE /api/projects[/{id}]` —— Project CRUD
-- `GET  /api/traces` —— Span 列表（支持 `project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / 时间范围过滤）
+- `GET  /api/traces` —— Span 列表（支持 `project_id` / `trace_id` / `user_id` / `session_id` / `model` / `status` / `span_kind` / `agent_name` / `agent_role` / 时间范围过滤）
 - `GET  /api/traces/{id}` —— Span 详情（不含 body）
 - `GET  /api/traces/{id}/body?part=request|response` —— body 字节
   - 默认：api 从 MinIO 拉字节流式转发给浏览器，MinIO 可内网
   - `AILENS360_BODY_STORE_PRESIGN_REDIRECT=true`：返回 302 → 浏览器直拉 MinIO（要求 MinIO 对外可达 + CORS）
 - `GET  /api/trace_groups` —— Langfuse 风格逻辑 trace 聚合（按 `trace_id` 收敛）
-- `GET  /api/metrics/usage` —— 用量聚合（维度：model / project / day / hour）
+- `POST /api/ingest/spans` —— Agent/Tool span 上报（项目密钥鉴权；代理只负责 LLM span）
+- `GET  /api/metrics/usage` —— 用量聚合（维度：model / project / agent / agent_path / day / hour）
 - `GET  /healthz` / `GET /version`
 
 **额外职责**：
@@ -430,12 +431,12 @@ PG `traces` 表**完全不存 body 字节**，只保留 body 在对象存储中�
 
 ## 五、数据模型
 
-> Schema 以 `internal/storage/postgres/migrations/0001_init.up.sql` 为准；运行时由启动逻辑自动 apply。
+> Schema 以 `internal/storage/postgres/migrations/*.up.sql` 为准；运行时由启动逻辑按文件名顺序自动 apply。
 
 ### 5.1 设计原则
 
 1. **一级实体只有两张表**：`projects` 与 `traces`（后者是分区表，子分区 `traces_YYYYMM` 自动生成）。
-2. **Trace 即 Span**：每一次代理转发的上游 HTTP 调用对应 `traces` 表中一行。多行通过 `trace_id` 聚合成一次"逻辑 trace"（Langfuse 语义），便于多步 Agent 场景的链路视图。
+2. **Trace 即 Span 树**：每一次代理转发的上游 HTTP 调用对应 `traces` 表中一行。多行通过 `trace_id` 聚合成一次"逻辑 trace"；`parent_span_id` 把它们连成树，`span_kind` / `agent_*` 标明这是主 Agent、子 Agent、模型调用还是工具调用。旧客户端只发 `trace_id` 时仍退化为平铺列表（`parent_span_id=''`、`span_kind='llm'`）。
 3. **敏感 Header 入库前 REDACT**：见 §4.2。
 4. **请求 / 响应正文外置**：bodies 存 MinIO/S3，PG 只保留对象 key + size，主表瘦身、备份变小。
 5. **时间戳统一为 Unix 毫秒**（traces）/ Unix 秒（projects），`BIGINT` 存储，避免驱动层时区问题。
@@ -459,7 +460,7 @@ PG `traces` 表**完全不存 body 字节**，只保留 body 在对象存储中�
 
 ### 5.3 `traces`（分区表）
 
-每次代理转发到上游的 HTTP 调用一行。语义上是 **logical trace 的一个 span**——多行通过 `trace_id` 聚合。
+每次代理转发到上游的模型 HTTP 调用一行；Agent/Tool 这类没有上游 HTTP 的节点通过 `POST /api/ingest/spans` 写入同一张表。语义上都是 **logical trace 的一个 span**——多行通过 `trace_id` 聚合，`parent_span_id` 连成树。
 
 声明为 `PARTITION BY RANGE (created_at)`；子分区按月（`traces_YYYYMM`）由 collector 进程的分区维护器自动建。PK 必须包含分区键，因此为 `(id, created_at)`。
 
@@ -474,6 +475,23 @@ PG `traces` 表**完全不存 body 字节**，只保留 body 在对象存储中�
 | `user_id` | TEXT | 来自 `X-AILens-User` |
 | `session_id` | TEXT | 来自 `X-AILens-Session` |
 | `tags` | TEXT | 来自 `X-AILens-Tag`，逗号分隔 |
+
+#### Span 树与 Agent 身份
+
+| 列 | 类型 | 含义 |
+|---|---|---|
+| `parent_span_id` | TEXT | 父 span；空表示逻辑 trace 的根 |
+| `span_kind` | TEXT | `llm`（默认）/ `agent` / `tool` |
+| `span_name` | TEXT | 低基数操作名，如 `worker.llm`、`researcher.run` |
+| `agent_id` | TEXT | 稳定 agent 类型，如 `mtunion.worker` |
+| `agent_name` | TEXT | 展示名，如 `worker` |
+| `agent_role` | TEXT | `main` / `sub` / `system` |
+| `agent_path` | TEXT | 物化层级路径，如 `/main/worker/researcher` |
+| `attributes` | TEXT | span 级 JSON（tool 参数摘要、task_id 等） |
+
+索引：`(trace_id, parent_span_id)` 用于拉一棵树，`(trace_id, span_kind)` 用于区分模型调用，`(project_id, agent_name, created_at)` 用于按 agent 聚合。
+
+**口径约束**：`traces` 现在同时存模型调用和 agent/tool span，所有计费/用量查询必须只算 `span_kind='llm'`。迁移里建了 `llm_spans` 视图（`SELECT * FROM traces WHERE span_kind='llm'`），`ListGroups` / `UsageByDimension` / `Facets` 已切到该视图或显式 `FILTER`；新增聚合查询时不要再直接 `FROM traces` 算调用数/成本。
 
 #### 路由与协议
 
@@ -554,10 +572,11 @@ PK `(id, created_at)` 自动是分区索引；`GetByID(id)` 不带 `created_at` 
 
 `TraceGroup` 不是物理表，而是 `internal/storage/repo/types.go` 中定义的逻辑视图——按 `trace_id` 在查询时聚合：
 
-- `span_count`：组内 span 数
-- `input_tokens / output_tokens / total_tokens / cost_usd`：组内求和
-- `latency_ms`：组内 `max(created_at) − min(created_at)`
-- `status`：组内"最坏态"（`error > aborted > success`）
+- `span_count`：组内 LLM 调用数（`span_kind='llm'`，不含 agent/tool span）
+- `agent_count` / `agents`：组内去重后的 Agent 数与名字
+- `input_tokens / output_tokens / total_tokens / cost_usd`：只对 LLM span 求和
+- `latency_ms`：组内 `max(created_at + latency_ms) − min(created_at)`（墙钟时间，避免并发 span 重复计时）
+- `status`：组内"最坏态"（`error > aborted > success`，含 agent span）
 
 `GET /api/trace_groups` 返回该视图；`GET /api/traces` 仍返回 span 列表，可通过 `trace_id` 过滤展开单组。
 

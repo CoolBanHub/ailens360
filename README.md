@@ -42,6 +42,7 @@ AILens360 用一个**反向代理 + 可视化控制台**的方式，让上面这
 - Token / Cost 统计（按模型、项目、用户、会话等维度聚合）
 - 延迟指标（TTFT、TTFB、总耗时、TPS）
 - 错误状态、终止状态与基础归因信息
+- Agent / 子 Agent / 工具调用的 span 树，按 agent 汇总 token 与 cost
 
 ### 🛠️ 当前控制台能力
 - Web 控制台支持登录、项目管理、接入指引
@@ -68,7 +69,7 @@ AILens360 用一个**反向代理 + 可视化控制台**的方式，让上面这
 
 ![项目概览](./docs/images/dashboard-overview.png)
 
-**Trace 详情**：调用链时间轴、每个 span 的耗时与 token 消耗，以及完整的输入 / 输出消息（支持格式化与原始 JSON 两种视图）。
+**Trace 详情**：Agent / 子 Agent / 工具调用的 span 树、每个 span 的耗时与 token 消耗，以及完整的输入 / 输出消息（支持格式化与原始 JSON 两种视图）。
 
 ![Trace 详情](./docs/images/trace-detail.png)
 

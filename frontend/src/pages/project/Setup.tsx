@@ -286,6 +286,10 @@ cm, _ := openai.NewChatModel(ctx, &openai.ChatModelConfig{
             ['X-AILens-Session',    t('setup.meta.session.desc')],
             ['X-AILens-Trace-Id',   t('setup.meta.trace.desc')],
             ['X-AILens-Trace-Name', t('setup.meta.traceName.desc')],
+            ['X-AILens-Parent-Span-Id', t('setup.meta.parent.desc')],
+            ['X-AILens-Agent-Name', t('setup.meta.agentName.desc')],
+            ['X-AILens-Agent-Role', t('setup.meta.agentRole.desc')],
+            ['X-AILens-Agent-Path', t('setup.meta.agentPath.desc')],
           ].map(([k, v]) => (
             <div key={k} className="rounded-2xl bg-white/55 border border-white/70 px-3.5 py-3">
               <div className="mono text-[12.5px] font-semibold text-ink">{k}</div>

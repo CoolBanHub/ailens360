@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import type { ListResp, Trace } from '../../lib/types';
 import { fmtCost, fmtCostFine, fmtDur, fmtTs, copyToClipboard } from '../../lib/fmt';
 import BodyViewer from '../../components/BodyViewer';
+import { AgentSpanPanel, SpanTree, buildSpanTree, isLLMSpan, spanKind, summarizeAgents, type AgentSummary } from '../../components/SpanTree';
 import { TokenCell } from '../../components/TokenCell';
 import { CopyableId } from '../../components/CopyableId';
 import { useT } from '../../i18n';
@@ -37,12 +38,12 @@ export default function TraceDetail() {
     queryKey: ['trace_spans', traceId],
     enabled: !!traceId,
     queryFn: () =>
-      api.get<ListResp<Trace>>('/traces?limit=200&trace_id=' + encodeURIComponent(traceId)),
+      api.get<ListResp<Trace>>('/traces?limit=2000&trace_id=' + encodeURIComponent(traceId)),
   });
 
   const items = spansQ.data?.items ?? [];
   const first = items[0];
-  const isSingleSpan = items.length === 1;
+  const isSingleSpan = items.length === 1 && !items[0]?.ParentSpanID;
   const statusLabel = (s: string) => {
     const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
     const v = tt(key);
@@ -69,17 +70,25 @@ export default function TraceDetail() {
     setSearch(next, { replace: true });
   };
 
-  // overall trace stats from span aggregate
-  const t0 = first ? new Date(first.CreatedAt).getTime() : 0;
-  const last = items[items.length - 1];
-  const tn = last ? new Date(last.CreatedAt).getTime() + (last.LatencyMs || 0) : 0;
-  const totalDur   = tn - t0;
-  const totalIn         = items.reduce((s, x) => s + (x.InputTokens || 0), 0);
-  const totalOut        = items.reduce((s, x) => s + (x.OutputTokens || 0), 0);
-  const totalCached     = items.reduce((s, x) => s + (x.CachedInputTokens || 0), 0);
-  const totalCacheWrite = items.reduce((s, x) => s + (x.CacheCreationInputTokens || 0), 0);
-  const totalReasoning  = items.reduce((s, x) => s + (x.ReasoningTokens || 0), 0);
-  const totalCost       = items.reduce((s, x) => s + (x.CostUSD || 0), 0);
+  // Build the real span tree. Stats are computed over LLM leaves only so the
+  // KPI tiles match billing; agent/tool spans contribute structure, not tokens.
+  const tree = useMemo(() => buildSpanTree(items), [items]);
+  const agents = useMemo(() => summarizeAgents(tree.roots), [tree]);
+  const llmItems = useMemo(() => items.filter((s) => spanKind(s) === 'llm'), [items]);
+  const t0 = items.length ? Math.min(...items.map((s) => new Date(s.CreatedAt).getTime())) : 0;
+  const tn = items.length
+    ? Math.max(...items.map((s) => new Date(s.CreatedAt).getTime() + (s.LatencyMs || 0)))
+    : 0;
+  const totalDur        = Math.max(0, tn - t0);
+  const totalIn         = llmItems.reduce((s, x) => s + (x.InputTokens || 0), 0);
+  const totalOut        = llmItems.reduce((s, x) => s + (x.OutputTokens || 0), 0);
+  const totalCached     = llmItems.reduce((s, x) => s + (x.CachedInputTokens || 0), 0);
+  const totalCacheWrite = llmItems.reduce((s, x) => s + (x.CacheCreationInputTokens || 0), 0);
+  const totalReasoning  = llmItems.reduce((s, x) => s + (x.ReasoningTokens || 0), 0);
+  const totalCost       = llmItems.reduce((s, x) => s + (x.CostUSD || 0), 0);
+  const agentCount      = new Set(items.map((s) => s.AgentPath || s.AgentName).filter(Boolean)).size;
+  const traceName       = items.find((s) => s.TraceName)?.TraceName || '';
+  const activeNode      = tree.byId.get(activeSpanId);
   const worst = items.reduce(
     (acc, x) => x.Status === 'error' ? 'error'
                  : (x.Status === 'aborted' && acc !== 'error') ? 'aborted' : acc,
@@ -102,7 +111,7 @@ export default function TraceDetail() {
         </Link>
         <span className="text-ink-4">/</span>
         <span className="font-semibold text-ink truncate">
-          {first?.TraceName || <span className="mono text-ink-4 font-normal text-[13px]">{first?.TraceID?.slice(0, 8)}</span>}
+          {traceName || <span className="mono text-ink-4 font-normal text-[13px]">{first?.TraceID?.slice(0, 8)}</span>}
         </span>
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                           text-[11px] font-semibold border ${toneCls(worst)}`}>
@@ -117,7 +126,7 @@ export default function TraceDetail() {
         <aside className="glass glass-edge p-3 xl:sticky xl:top-3 max-h-[calc(100vh-160px)] overflow-y-auto">
           <div className="px-2 pt-1 pb-2 flex items-center justify-between">
             <div className="text-[10px] uppercase tracking-[0.18em] text-ink-4 font-bold">{tt('detail.spans')}</div>
-            <div className="text-[10px] text-ink-4 tnum">{items.length}</div>
+            <div className="text-[10px] text-ink-4 tnum">{llmItems.length} calls · {agentCount} agents</div>
           </div>
           {spansQ.isLoading ? (
             <div className="space-y-2 px-1">
@@ -144,13 +153,13 @@ export default function TraceDetail() {
                   <div className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500" />
                     <div className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                      {first?.TraceName || <span className="mono text-ink-4 text-[11px]">{first?.TraceID?.slice(0, 8)}</span>}
+                      {traceName || <span className="mono text-ink-4 text-[11px]">{first?.TraceID?.slice(0, 8)}</span>}
                     </div>
                     <span className="text-[10px] mono text-ink-4 tnum">{fmtDur(totalDur)}</span>
                   </div>
                   <div className="mt-1 flex items-center justify-between gap-2">
                     <div className="text-[10px] mono text-ink-4">
-                      root · {items.length} spans · {fmtCost(totalCost)}
+                      root · {llmItems.length} calls · {agentCount} agents · {fmtCost(totalCost)}
                     </div>
                     <TokenCell
                       size="sm"
@@ -166,69 +175,18 @@ export default function TraceDetail() {
                 </button>
               )}
 
-              {items.map((s, i) => {
-                const start = new Date(s.CreatedAt).getTime() - t0;
-                const dur = s.LatencyMs || 0;
-                const startPct = totalDur > 0 ? (start / totalDur) * 100 : 0;
-                const durPct = totalDur > 0 ? Math.max(2, (dur / totalDur) * 100) : 100;
-                const isActive = s.ID === activeSpanId;
-                const dotTone = dotCls(s.Status);
-                return (
-                  <button
-                    key={s.ID}
-                    onClick={() => selectSpan(s.ID)}
-                    className={
-                      'text-left rounded-xl border px-3 py-2 transition relative ' +
-                      (isActive
-                        ? 'bg-white border-indigo-300/70 shadow-[0_2px_10px_-2px_rgba(99,102,241,0.30)]'
-                        : 'bg-white/55 border-white/70 hover:bg-white/85')
-                    }
-                  >
-                    {/* nested indent line */}
-                    <div className="absolute left-[14px] top-0 bottom-0 w-px bg-[color:var(--glass-line)]"
-                         aria-hidden="true" />
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="mono text-[10px] text-ink-4 w-5">#{i + 1}</span>
-                      <span className={`dot ${dotTone}`} />
-                      <span className="font-semibold text-[12.5px] text-ink truncate flex-1">
-                        {s.Model}
-                      </span>
-                      {s.IsStream && (
-                        <span className="text-[8.5px] uppercase tracking-[0.14em] text-indigo-600
-                                         font-semibold px-1.5 py-0.5 rounded-full bg-indigo-50/80 border border-indigo-200/60">
-                          stream
-                        </span>
-                      )}
-                      <span className="text-[11px] mono text-ink-4 tnum">{fmtDur(dur)}</span>
-                    </div>
-                    {/* waterfall bar */}
-                    <div className="relative h-1.5 rounded-full bg-slate-200/50 overflow-hidden">
-                      <div
-                        className="absolute top-0 h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400"
-                        style={{ left: startPct + '%', width: durPct + '%' }}
-                      />
-                    </div>
-                    <div className="mt-1 flex justify-between items-center gap-2 text-[10px] mono text-ink-4">
-                      <span>+{fmtDur(start)}</span>
-                      <div className="flex items-center gap-2">
-                        <TokenCell
-                          size="sm"
-                          tokens={{
-                            input: s.InputTokens,
-                            output: s.OutputTokens,
-                            cached: s.CachedInputTokens,
-                            cacheCreate: s.CacheCreationInputTokens,
-                            reasoning: s.ReasoningTokens,
-                            total: s.TotalTokens,
-                            estimated: s.TokensEstimated,
-                          }}
-                        />
-                        <span>{fmtCostFine(s.CostUSD)}</span>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+              <SpanTree
+                roots={tree.roots}
+                activeSpanId={activeSpanId}
+                onSelect={selectSpan}
+                t0={t0}
+                totalDur={totalDur}
+              />
+              {tree.syntheticCount > 0 && (
+                <div className="px-2 pt-1 text-[10px] text-amber-700/80">
+                  {tt('detail.agent.syntheticHint')}
+                </div>
+              )}
             </div>
           )}
         </aside>
@@ -239,9 +197,11 @@ export default function TraceDetail() {
             <TraceSummaryPanel
               projectId={projectId}
               traceId={traceId}
-              name={first?.TraceName || ''}
+              name={traceName}
               status={worst}
-              spanCount={items.length}
+              spanCount={llmItems.length}
+              agentCount={agentCount}
+              agents={agents}
               totalDur={totalDur}
               totalIn={totalIn}
               totalOut={totalOut}
@@ -249,11 +209,13 @@ export default function TraceDetail() {
               totalCacheWrite={totalCacheWrite}
               totalReasoning={totalReasoning}
               totalCost={totalCost}
-              startedAt={first?.CreatedAt}
-              userId={first?.UserID}
-              sessionId={first?.SessionID}
+              startedAt={items.find((s) => s.CreatedAt)?.CreatedAt}
+              userId={items.find((s) => s.UserID)?.UserID}
+              sessionId={items.find((s) => s.SessionID)?.SessionID}
               spans={items}
             />
+          ) : activeNode && !isLLMSpan(activeNode) ? (
+            <AgentSpanPanel node={activeNode} onSelect={selectSpan} />
           ) : (
             <SpanDetailPanel
               spanId={activeSpanId}
@@ -277,6 +239,8 @@ interface TraceSummaryProps {
   name: string;
   status: string;
   spanCount: number;
+  agentCount: number;
+  agents: AgentSummary[];
   totalDur: number;
   totalIn: number;
   totalOut: number;
@@ -296,7 +260,8 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
   const [isCopying, setIsCopying] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
-  const latestSpan = p.spans[p.spans.length - 1];
+  const analysisSpans = p.spans.filter(isLLMSpan);
+  const latestSpan = [...analysisSpans].reverse().find((s) => s.RequestBodyKey || s.ResponseBodyKey);
 
   const statusLabel = (s: string) => {
     const key = ('traces.status.' + s) as Parameters<typeof tt>[0];
@@ -306,7 +271,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
 
   // AI Analysis: fetch all request/response bodies and download as file
   const handleAIAnalysis = async () => {
-    if (p.spans.length === 0) return;
+    if (analysisSpans.length === 0) return;
     try {
       setIsCopying(true);
       setCopyError(null);
@@ -318,7 +283,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
 
       // Fetch all request/response bodies in parallel
       const bodies = await Promise.all(
-        p.spans.map(async (span) => {
+        analysisSpans.map(async (span) => {
           const [requestBody, responseBody] = await Promise.all([
             fetch(`/api/traces/${span.ID}/body?part=request`, { headers }).then(r => r.text()).catch(() => ''),
             fetch(`/api/traces/${span.ID}/body?part=response`, { headers }).then(r => r.text()).catch(() => ''),
@@ -328,7 +293,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
       );
 
       // Generate combined analysis content
-      const content = generateMultiTurnAnalysisContent(p.spans, bodies, {
+      const content = generateMultiTurnAnalysisContent(analysisSpans, bodies, {
         totalDur: p.totalDur,
         totalIn: p.totalIn,
         totalOut: p.totalOut,
@@ -369,7 +334,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
           <button
             type="button"
             onClick={handleAIAnalysis}
-            disabled={isCopying || p.spans.length === 0}
+            disabled={isCopying || analysisSpans.length === 0}
             className="ml-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
                        bg-gradient-to-r from-emerald-500 to-teal-500
                        hover:from-emerald-600 hover:to-teal-600
@@ -382,7 +347,7 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
             </svg>
-            {isCopying ? '下载中...' : `下载分析 (${p.spans.length})`}
+            {isCopying ? '下载中...' : `下载分析 (${analysisSpans.length})`}
           </button>
           {copySuccess && (
             <span className="text-[10.5px] text-emerald-600">✓ 已下载</span>
@@ -410,6 +375,39 @@ function TraceSummaryPanel(p: TraceSummaryProps) {
           />
           <Tile label={tt('detail.tile.cost')}     value={fmtCost(p.totalCost)} mono />
         </div>
+
+        {/* agent breakdown: answers "which agent owns which calls" without
+            opening every span. */}
+        {p.agents.length > 0 && (
+          <div className="mt-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-ink-4 font-semibold">
+              <span>{tt('detail.agents')}</span>
+              <span className="tnum">{p.agentCount}</span>
+            </div>
+            <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {p.agents.map((a) => {
+                const role = a.role || 'system';
+                const tone = role === 'main'
+                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200/70'
+                  : role === 'sub'
+                    ? 'bg-violet-50 text-violet-700 border-violet-200/70'
+                    : 'bg-slate-100 text-slate-600 border-slate-200/70';
+                return (
+                  <div key={a.key} className="rounded-xl border border-white/70 bg-white/55 px-3 py-2 flex items-center gap-2 min-w-0">
+                    <span className={`text-[9px] uppercase tracking-[0.12em] font-bold px-1.5 py-0.5 rounded-full border ${tone}`}>
+                      {role === 'main' ? tt('detail.agent.main') : role === 'sub' ? tt('detail.agent.sub') : tt('detail.agent.system')}
+                    </span>
+                    <span className="font-semibold text-[12px] text-ink truncate">{a.name}</span>
+                    <span className="mono text-[10px] text-ink-4 truncate">{a.path}</span>
+                    <span className="ml-auto text-[10px] mono text-ink-4 tnum shrink-0">
+                      {a.calls} calls · {fmtDur(Math.max(0, a.end - a.start))} · {fmtCostFine(a.cost)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* meta footer */}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-ink-3">

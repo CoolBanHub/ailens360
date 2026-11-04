@@ -189,7 +189,7 @@ func TestServeAcceptsQueryProjectKeyAndStripsItFromUpstream(t *testing.T) {
 	}
 }
 
-func TestServeUsesMetadataSessionIDAsTraceFallback(t *testing.T) {
+func TestServeKeepsSessionSeparateFromTraceID(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -214,11 +214,86 @@ func TestServeUsesMetadataSessionIDAsTraceFallback(t *testing.T) {
 	if sink.ev.SessionID != "sess_1" {
 		t.Fatalf("session_id = %q, want sess_1", sink.ev.SessionID)
 	}
-	if sink.ev.LogicTraceID != "sess_1" {
-		t.Fatalf("logic_trace_id = %q, want sess_1", sink.ev.LogicTraceID)
+	if sink.ev.LogicTraceID == "" || sink.ev.LogicTraceID == "sess_1" {
+		t.Fatalf("logic_trace_id = %q, want an auto-generated per-request trace id", sink.ev.LogicTraceID)
+	}
+	if sink.ev.LogicTraceID != sink.ev.TraceID {
+		t.Fatalf("logic_trace_id = %q, want span id %q", sink.ev.LogicTraceID, sink.ev.TraceID)
 	}
 	if sink.ev.UserID != "dev_1" {
 		t.Fatalf("user_id = %q, want dev_1", sink.ev.UserID)
+	}
+}
+
+func TestServeExtractsSpanTreeHeaders(t *testing.T) {
+	var upstreamHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	sink := &captureSink{}
+	h := newTestHandlerWithSink("sk-test", sink)
+	req := httptest.NewRequest(http.MethodPost, "/"+upstream.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5.5"}`))
+	req.Header.Set("X-AILens-Project-Key", "sk-test")
+	req.Header.Set("X-AILens-Trace-Id", "task_123")
+	req.Header.Set("X-AILens-Parent-Span-Id", "sp_worker_1")
+	req.Header.Set("X-AILens-Span-Kind", "llm")
+	req.Header.Set("X-AILens-Span-Name", "worker.llm")
+	req.Header.Set("X-AILens-Agent-Id", "mtunion.worker")
+	req.Header.Set("X-AILens-Agent-Name", "worker")
+	req.Header.Set("X-AILens-Agent-Role", "main")
+	req.Header.Set("X-AILens-Agent-Path", "/main/worker")
+	rec := httptest.NewRecorder()
+
+	h.serve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if sink.ev == nil {
+		t.Fatal("no event submitted")
+	}
+	if sink.ev.LogicTraceID != "task_123" || sink.ev.ParentSpanID != "sp_worker_1" {
+		t.Fatalf("trace/parent = %q/%q", sink.ev.LogicTraceID, sink.ev.ParentSpanID)
+	}
+	if sink.ev.SpanKind != "llm" || sink.ev.SpanName != "worker.llm" {
+		t.Fatalf("span = %q/%q", sink.ev.SpanKind, sink.ev.SpanName)
+	}
+	if sink.ev.AgentID != "mtunion.worker" || sink.ev.AgentName != "worker" ||
+		sink.ev.AgentRole != "main" || sink.ev.AgentPath != "/main/worker" {
+		t.Fatalf("agent = %+v", sink.ev)
+	}
+	// Internal telemetry must never leak to the upstream provider.
+	for _, h := range []string{"X-AILens-Parent-Span-Id", "X-AILens-Agent-Name", "X-AILens-Agent-Path"} {
+		if upstreamHeaders.Get(h) != "" {
+			t.Fatalf("upstream received internal header %s", h)
+		}
+	}
+}
+
+func TestParseTraceparentAsParentSpan(t *testing.T) {
+	h := http.Header{}
+	h.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	span := parseSpanMeta(h, "")
+	if span.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("trace id = %q", span.TraceID)
+	}
+	if span.ParentSpanID != "00f067aa0ba902b7" {
+		t.Fatalf("parent = %q", span.ParentSpanID)
+	}
+	if span.SpanKind != "llm" {
+		t.Fatalf("kind = %q, want llm default", span.SpanKind)
+	}
+}
+
+func TestParseTraceparentRejectsMalformed(t *testing.T) {
+	for _, v := range []string{"", "00-xyz-abc-01", "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"} {
+		if _, _, ok := parseTraceparent(v); ok {
+			t.Fatalf("parseTraceparent(%q) ok = true, want false", v)
+		}
 	}
 }
 
